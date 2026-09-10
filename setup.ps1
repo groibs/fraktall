@@ -58,6 +58,15 @@ function Resolve-Python {
   return $null
 }
 
+function Invoke-PythonScript([string]$ScriptPath, [string[]]$ScriptArgs) {
+  if ($pythonCmd.Count -eq 2) {
+    & $pythonCmd[0] $pythonCmd[1] $ScriptPath @ScriptArgs
+  } else {
+    & $pythonCmd[0] $ScriptPath @ScriptArgs
+  }
+  if ($LASTEXITCODE -ne 0) { throw "Python script failed: $ScriptPath" }
+}
+
 Write-Host "`nFraktall local setup" -ForegroundColor Green
 Write-Host "Workspace: $Root`n"
 
@@ -121,13 +130,8 @@ if (Test-Path (Join-Path $AppDir '.git')) {
 }
 
 Write-Host 'Applying Fraktall patches...' -ForegroundColor Cyan
-$patcher = Join-Path $Root 'apply_patch.py'
-if ($pythonCmd.Count -eq 2) {
-  & $pythonCmd[0] $pythonCmd[1] $patcher --app $AppDir
-} else {
-  & $pythonCmd[0] $patcher --app $AppDir
-}
-if ($LASTEXITCODE -ne 0) { throw 'Fraktall patch failed.' }
+Invoke-PythonScript (Join-Path $Root 'apply_patch.py') @('--app', $AppDir)
+Invoke-PythonScript (Join-Path $Root 'apply_local_defaults.py') @('--app', $AppDir)
 
 Write-Host 'Installing desktop app dependencies...' -ForegroundColor Cyan
 Push-Location $AppDir
