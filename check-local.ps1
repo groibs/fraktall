@@ -45,10 +45,12 @@ if ($ollamaOk) {
   try {
     $tags = Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/tags' -TimeoutSec 3
     $modelNames = @($tags.models | ForEach-Object { $_.name })
-    if ($modelNames -match '^qwen3:4b-instruct') {
-      Pass 'qwen3:4b-instruct is installed'
+    if ($modelNames -match '^fraktall-qwen(?::latest)?$') {
+      Pass 'fraktall-qwen is installed'
+    } elseif ($modelNames -match '^qwen3:4b-instruct') {
+      Fail 'Base Qwen model exists, but fraktall-qwen is missing; rerun setup.ps1 to create the tuned profile'
     } else {
-      Fail 'qwen3:4b-instruct is not installed; run: ollama pull qwen3:4b-instruct'
+      Fail 'Fraktall Qwen model is missing; rerun setup.ps1'
     }
   } catch {
     Fail 'Could not inspect Ollama models'
