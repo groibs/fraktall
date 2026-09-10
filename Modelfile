@@ -1,0 +1,8 @@
+FROM qwen3:4b-instruct
+
+# Large enough for ordinary long-form podcast transcripts without asking a 4 GB GPU
+# to carry an absurd KV cache. Very long shows will move to windowed analysis later.
+PARAMETER num_ctx 32768
+PARAMETER temperature 0.15
+PARAMETER top_p 0.9
+PARAMETER repeat_penalty 1.05
