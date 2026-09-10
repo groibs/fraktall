@@ -7,8 +7,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $AppDir = Join-Path $Root 'app'
+$WhisperDir = Join-Path $Root 'local-whisper'
 $VenvPython = Join-Path $Root '.venv\Scripts\python.exe'
-$WhisperServer = Join-Path $Root 'local-whisper\server.py'
 $OllamaModel = 'qwen3:4b-instruct'
 $WhisperPort = 8178
 
@@ -41,14 +41,14 @@ $env:WHISPER_DEVICE = $WhisperDevice
 $whisperProcess = $null
 if (-not (Test-Http "http://127.0.0.1:$WhisperPort/health")) {
   Write-Host "Starting local Whisper ($WhisperModel, $WhisperDevice)..." -ForegroundColor Cyan
-  $whisperArgs = @(
-    '-m', 'uvicorn',
-    'server:app',
-    '--app-dir', (Join-Path $Root 'local-whisper'),
-    '--host', '127.0.0.1',
-    '--port', "$WhisperPort"
-  )
-  $whisperProcess = Start-Process -FilePath $VenvPython -ArgumentList $whisperArgs -WindowStyle Hidden -PassThru
+  $whisperArgs = @('-m', 'uvicorn', 'server:app', '--host', '127.0.0.1', '--port', "$WhisperPort")
+  $whisperProcess = Start-Process `
+    -FilePath $VenvPython `
+    -ArgumentList $whisperArgs `
+    -WorkingDirectory $WhisperDir `
+    -WindowStyle Hidden `
+    -PassThru
+
   for ($i = 0; $i -lt 45; $i++) {
     Start-Sleep -Seconds 1
     if (Test-Http "http://127.0.0.1:$WhisperPort/health") { break }
@@ -59,7 +59,7 @@ if (-not (Test-Http "http://127.0.0.1:$WhisperPort/health")) {
   throw 'Local Whisper did not start on port 8178.'
 }
 
-# ClipForge expects a key even when an OpenAI-compatible local server ignores it.
+# ClipForge expects a key even when local OpenAI-compatible servers ignore it.
 $env:OPENAI_API_KEY = 'fraktall-local'
 $env:OPENAI_BASE_URL = 'http://127.0.0.1:11434/v1'
 $env:OPENAI_TRANSCRIPTION_BASE_URL = "http://127.0.0.1:$WhisperPort/v1"
