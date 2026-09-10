@@ -1,0 +1,57 @@
+name: Build Fraktall Windows
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Fraktall
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Clone pinned ClipForge
+        shell: pwsh
+        run: |
+          git clone https://github.com/JeremySNR/clip-forge.git app
+          git -C app checkout --detach 35814e546db958c6d66d4f82697bf6c2136d62af
+
+      - name: Apply Fraktall patch
+        run: python apply_patch.py --app app
+
+      - name: Install dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Validate
+        working-directory: app
+        shell: pwsh
+        run: |
+          npm run typecheck
+          npm test
+
+      - name: Package Windows installer
+        working-directory: app
+        run: npm run package
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: fraktall-windows
+          path: |
+            app/release/*.exe
+            app/release/*.yml
+          if-no-files-found: error
