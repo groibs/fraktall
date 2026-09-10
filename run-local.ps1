@@ -9,7 +9,7 @@ $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $AppDir = Join-Path $Root 'app'
 $WhisperDir = Join-Path $Root 'local-whisper'
 $VenvPython = Join-Path $Root '.venv\Scripts\python.exe'
-$OllamaModel = 'qwen3:4b-instruct'
+$OllamaModel = 'fraktall-qwen'
 $WhisperPort = 8178
 
 function Test-Http([string]$Url) {
