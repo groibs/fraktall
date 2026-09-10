@@ -30,7 +30,10 @@ jobs:
           git -C app checkout --detach 35814e546db958c6d66d4f82697bf6c2136d62af
 
       - name: Apply Fraktall patch
-        run: python apply_patch.py --app app
+        shell: pwsh
+        run: |
+          python apply_patch.py --app app
+          python apply_local_defaults.py --app app
 
       - name: Install dependencies
         working-directory: app
