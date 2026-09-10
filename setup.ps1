@@ -10,7 +10,8 @@ $AppDir = Join-Path $Root 'app'
 $VenvDir = Join-Path $Root '.venv'
 $Upstream = 'https://github.com/JeremySNR/clip-forge.git'
 $UpstreamCommit = '35814e546db958c6d66d4f82697bf6c2136d62af'
-$Model = 'qwen3:4b-instruct'
+$BaseModel = 'qwen3:4b-instruct'
+$FraktallModel = 'fraktall-qwen'
 
 function Refresh-Path {
   $machine = [Environment]::GetEnvironmentVariable('Path', 'Machine')
@@ -99,8 +100,10 @@ if (-not $SkipOllama) {
   }
 
   if (-not $SkipPullModel) {
-    Write-Host "Pulling $Model..." -ForegroundColor Cyan
-    ollama pull $Model
+    Write-Host "Pulling $BaseModel..." -ForegroundColor Cyan
+    ollama pull $BaseModel
+    Write-Host "Creating tuned local profile $FraktallModel..." -ForegroundColor Cyan
+    ollama create $FraktallModel -f (Join-Path $Root 'Modelfile')
   }
 }
 
@@ -153,4 +156,4 @@ Write-Host 'Installing faster-whisper dependencies...' -ForegroundColor Cyan
 Write-Host "`nSetup complete." -ForegroundColor Green
 Write-Host 'Run:' -ForegroundColor White
 Write-Host '  .\run-local.ps1' -ForegroundColor Yellow
-Write-Host "`nDefaults: Portuguese, podcast curation, Qwen3 4B Instruct local, faster-whisper Small local.`n"
+Write-Host "`nDefaults: Portuguese, podcast curation, fraktall-qwen local, faster-whisper Small local.`n"
