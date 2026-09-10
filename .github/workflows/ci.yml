@@ -29,7 +29,9 @@ jobs:
           git -C app checkout --detach 35814e546db958c6d66d4f82697bf6c2136d62af
 
       - name: Apply Fraktall patch
-        run: python apply_patch.py --app app
+        run: |
+          python apply_patch.py --app app
+          python apply_local_defaults.py --app app
 
       - name: Install Node dependencies
         working-directory: app
@@ -47,5 +49,5 @@ jobs:
         working-directory: app
         run: npm run lint
 
-      - name: Compile local Whisper server
-        run: python -m py_compile local-whisper/server.py apply_patch.py
+      - name: Compile Python helpers
+        run: python -m py_compile local-whisper/server.py apply_patch.py apply_local_defaults.py
