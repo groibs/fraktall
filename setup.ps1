@@ -1,0 +1,156 @@
+param(
+  [switch]$SkipOllama,
+  [switch]$SkipPullModel,
+  [switch]$ForceReset
+)
+
+$ErrorActionPreference = 'Stop'
+$Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$AppDir = Join-Path $Root 'app'
+$VenvDir = Join-Path $Root '.venv'
+$Upstream = 'https://github.com/JeremySNR/clip-forge.git'
+$UpstreamCommit = '35814e546db958c6d66d4f82697bf6c2136d62af'
+$Model = 'qwen3:4b-instruct'
+
+function Refresh-Path {
+  $machine = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+  $user = [Environment]::GetEnvironmentVariable('Path', 'User')
+  $env:Path = "$machine;$user"
+}
+
+function Have([string]$Name) {
+  return $null -ne (Get-Command $Name -ErrorAction SilentlyContinue)
+}
+
+function Ensure-WingetPackage([string]$Command, [string]$PackageId) {
+  if (Have $Command) { return }
+  if (-not (Have 'winget')) {
+    throw "'$Command' is missing and winget is unavailable. Install $PackageId manually, then rerun setup.ps1."
+  }
+  Write-Host "Installing $PackageId..." -ForegroundColor Cyan
+  winget install --id $PackageId -e --silent --accept-source-agreements --accept-package-agreements
+  Refresh-Path
+  if (-not (Have $Command)) {
+    throw "Installed $PackageId, but '$Command' is still not visible in PATH. Reopen PowerShell and rerun setup.ps1."
+  }
+}
+
+function Test-Http([string]$Url) {
+  try {
+    Invoke-WebRequest -UseBasicParsing -Uri $Url -TimeoutSec 2 | Out-Null
+    return $true
+  } catch {
+    return $false
+  }
+}
+
+function Resolve-Python {
+  if (Have 'py') {
+    foreach ($version in @('3.12', '3.11', '3.10')) {
+      try {
+        & py "-$version" -c "import sys; print(sys.executable)" | Out-Null
+        if ($LASTEXITCODE -eq 0) { return @('py', "-$version") }
+      } catch {}
+    }
+  }
+  if (Have 'python') { return @('python') }
+  return $null
+}
+
+Write-Host "`nFraktall local setup" -ForegroundColor Green
+Write-Host "Workspace: $Root`n"
+
+Ensure-WingetPackage 'git' 'Git.Git'
+Ensure-WingetPackage 'node' 'OpenJS.NodeJS.LTS'
+
+$pythonCmd = Resolve-Python
+if ($null -eq $pythonCmd) {
+  if (-not (Have 'winget')) { throw 'Python 3.10+ is required.' }
+  Write-Host 'Installing Python 3.11...' -ForegroundColor Cyan
+  winget install --id Python.Python.3.11 -e --silent --accept-source-agreements --accept-package-agreements
+  Refresh-Path
+  $pythonCmd = Resolve-Python
+}
+if ($null -eq $pythonCmd) {
+  throw 'Python installation was not detected. Reopen PowerShell and rerun setup.ps1.'
+}
+
+if (-not $SkipOllama) {
+  if (-not (Have 'ollama')) {
+    Write-Host 'Installing Ollama...' -ForegroundColor Cyan
+    if (Have 'winget') {
+      winget install --id Ollama.Ollama -e --silent --accept-source-agreements --accept-package-agreements
+    } else {
+      irm https://ollama.com/install.ps1 | iex
+    }
+    Refresh-Path
+  }
+  if (-not (Have 'ollama')) {
+    throw 'Ollama installation finished but ollama.exe is not visible. Reopen PowerShell and rerun setup.ps1.'
+  }
+
+  if (-not (Test-Http 'http://127.0.0.1:11434/api/tags')) {
+    Write-Host 'Starting Ollama server...' -ForegroundColor Cyan
+    Start-Process -FilePath 'ollama' -ArgumentList 'serve' -WindowStyle Hidden | Out-Null
+    for ($i = 0; $i -lt 30; $i++) {
+      Start-Sleep -Seconds 1
+      if (Test-Http 'http://127.0.0.1:11434/api/tags') { break }
+    }
+  }
+
+  if (-not $SkipPullModel) {
+    Write-Host "Pulling $Model..." -ForegroundColor Cyan
+    ollama pull $Model
+  }
+}
+
+if (Test-Path (Join-Path $AppDir '.git')) {
+  Write-Host 'Refreshing pinned ClipForge source...' -ForegroundColor Cyan
+  git -C $AppDir fetch origin $UpstreamCommit --depth=1
+  git -C $AppDir checkout --detach $UpstreamCommit
+  git -C $AppDir reset --hard $UpstreamCommit
+  if ($ForceReset) { git -C $AppDir clean -fd }
+} else {
+  if (Test-Path $AppDir) { Remove-Item -Recurse -Force $AppDir }
+  Write-Host 'Cloning pinned ClipForge base...' -ForegroundColor Cyan
+  git clone --no-tags $Upstream $AppDir
+  git -C $AppDir checkout --detach $UpstreamCommit
+}
+
+Write-Host 'Applying Fraktall patches...' -ForegroundColor Cyan
+$patcher = Join-Path $Root 'apply_patch.py'
+if ($pythonCmd.Count -eq 2) {
+  & $pythonCmd[0] $pythonCmd[1] $patcher --app $AppDir
+} else {
+  & $pythonCmd[0] $patcher --app $AppDir
+}
+if ($LASTEXITCODE -ne 0) { throw 'Fraktall patch failed.' }
+
+Write-Host 'Installing desktop app dependencies...' -ForegroundColor Cyan
+Push-Location $AppDir
+try {
+  npm ci
+} finally {
+  Pop-Location
+}
+
+if (-not (Test-Path $VenvDir)) {
+  Write-Host 'Creating local Whisper environment...' -ForegroundColor Cyan
+  if ($pythonCmd.Count -eq 2) {
+    & $pythonCmd[0] $pythonCmd[1] -m venv $VenvDir
+  } else {
+    & $pythonCmd[0] -m venv $VenvDir
+  }
+}
+
+$VenvPython = Join-Path $VenvDir 'Scripts\python.exe'
+if (-not (Test-Path $VenvPython)) { throw 'Virtual environment Python was not created.' }
+
+Write-Host 'Installing faster-whisper dependencies...' -ForegroundColor Cyan
+& $VenvPython -m pip install --upgrade pip
+& $VenvPython -m pip install -r (Join-Path $Root 'local-whisper\requirements.txt')
+
+Write-Host "`nSetup complete." -ForegroundColor Green
+Write-Host 'Run:' -ForegroundColor White
+Write-Host '  .\run-local.ps1' -ForegroundColor Yellow
+Write-Host "`nDefaults: Portuguese, podcast curation, Qwen3 4B Instruct local, faster-whisper Small local.`n"
