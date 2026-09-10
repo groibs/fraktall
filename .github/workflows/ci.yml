@@ -1,0 +1,51 @@
+name: Validate Fraktall
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  patch-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Fraktall
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Clone pinned ClipForge
+        run: |
+          git clone https://github.com/JeremySNR/clip-forge.git app
+          git -C app checkout --detach 35814e546db958c6d66d4f82697bf6c2136d62af
+
+      - name: Apply Fraktall patch
+        run: python apply_patch.py --app app
+
+      - name: Install Node dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: app
+        run: npm run typecheck
+
+      - name: Unit tests
+        working-directory: app
+        run: npm test
+
+      - name: Lint
+        working-directory: app
+        run: npm run lint
+
+      - name: Compile local Whisper server
+        run: python -m py_compile local-whisper/server.py apply_patch.py
