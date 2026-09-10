@@ -7,21 +7,33 @@ Local-first AI podcast/video clipper built on top of the MIT-licensed ClipForge 
 Paste a YouTube/podcast URL or choose a local video and automatically generate ready-to-post vertical clips with:
 
 - AI highlight selection
-- podcast/editorial curation modes
+- curation modes: Viral, Podcast, Insight, News, Institutional and Custom
 - virality + editorial + context-integrity scoring
 - word-level captions
 - speaker-aware reframing
 - auto zoom
 - silence/filler tightening
 - 9:16 / 1:1 / 16:9 exports
-- local Whisper transcription
+- local faster-whisper transcription
 - local Qwen analysis through Ollama
 
 No Supabase, Vercel, login, billing or cloud storage are required for the personal desktop build.
 
-## Quick start on Windows
+## Windows — easiest path
 
-When you are on the PC that will process videos:
+Clone the repository:
+
+```powershell
+git clone https://github.com/groibs/fraktall.git
+cd fraktall
+```
+
+Then either double-click:
+
+1. `INSTALL_WINDOWS.bat` — first installation only;
+2. `RUN_FRAKTALL.bat` — every time you want to use Fraktall.
+
+Or use PowerShell directly:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
@@ -29,7 +41,20 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\run-local.ps1
 ```
 
-The setup script is designed to install/check the dependencies, download a pinned ClipForge source, apply the Fraktall patch, create the local Whisper environment and pull `qwen3:4b` in Ollama.
+`setup.ps1` checks/installs the required local tooling, downloads the pinned ClipForge source, applies the Fraktall product/editorial patch, creates the Python environment for faster-whisper, pulls `qwen3:4b-instruct` and creates the tuned local Ollama profile `fraktall-qwen`.
+
+The first Whisper transcription downloads the selected speech model. The V0 default is multilingual `small`.
+
+## Local AI defaults
+
+- chat/curation: `fraktall-qwen` through Ollama
+- base model: `qwen3:4b-instruct`
+- context configured by Fraktall: 32K
+- transcription: faster-whisper `small`
+- language: Portuguese (`pt`)
+- default curation: Podcast
+
+The full source video is processed locally. Rendering, reframing, captions, transcription and LLM analysis do not need a cloud API in the supplied local launcher.
 
 ## Upstream
 
@@ -53,7 +78,7 @@ faster-whisper local
         ↓
 word-timestamp transcript
         ↓
-Ollama + Qwen3 4B
+Ollama + fraktall-qwen
         ↓
 Fraktall editorial ranking
         ↓
@@ -66,6 +91,14 @@ captions + zoom + tightening
 FFmpeg / NVENC export
 ```
 
+## Validation
+
+Start with a 10–20 minute Portuguese podcast before throwing a three-hour show at V0. See `docs/FIRST_TEST.md`.
+
+GitHub Actions definitions are included for patch/type/test validation and Windows packaging. The initial connector-authored commits do not automatically trigger GitHub Actions, so the first CI run still needs to occur before the current V0 can be called CI-validated.
+
 ## Status
 
-V0 personal/local build. The cloud/SaaS/live-clipping layer will come later, after the local podcast workflow is stable.
+V0 personal/local build. The next technical milestone after first-machine validation is windowed long-podcast analysis + global candidate ranking + a dedicated context-integrity pass.
+
+The cloud/SaaS/live-clipping layer comes later, after the local workflow proves itself.
