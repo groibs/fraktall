@@ -13,10 +13,6 @@ def replace_once(path: Path, old: str, new: str) -> None:
     path.write_text(text.replace(old, new, 1), encoding="utf-8")
 
 
-def clamp_ts_expr(raw: str) -> str:
-    return f"Math.max(0, Math.min(99, Math.round({raw})))"
-
-
 def patch_package(app: Path) -> None:
     for file_name in ("package.json", "package-lock.json"):
         path = app / file_name
@@ -97,52 +93,57 @@ def patch_types(app: Path) -> None:
 
 def write_fraktall_shared(app: Path) -> None:
     path = app / "src/shared/fraktall.ts"
-    path.write_text(
-        """import type { CurationMode } from './types'\n\n"
-        "export const CURATION_OPTIONS: Array<{ value: CurationMode; label: string; hint: string }> = [\n"
-        "  { value: 'viral', label: 'Viral', hint: 'Hook, emoção e compartilhamento' },\n"
-        "  { value: 'podcast', label: 'Podcast', hint: 'Histórias, opiniões e momentos fortes' },\n"
-        "  { value: 'insight', label: 'Insight', hint: 'Ideias, explicações e aprendizados' },\n"
-        "  { value: 'news', label: 'Notícia', hint: 'Novidade, anúncio, dado e consequência' },\n"
-        "  { value: 'institutional', label: 'Institucional', hint: 'Interesse público e relevância editorial' },\n"
-        "  { value: 'custom', label: 'Personalizado', hint: 'Seu prompt define a prioridade' }\n"
-        "]\n\n"
-        "export function curationGuidance(mode: CurationMode): string {\n"
-        "  switch (mode) {\n"
-        "    case 'viral':\n"
-        "      return 'CURATION MODE: VIRAL. Prioritize hooks, emotion, surprise, controversy, humour, practical value and shareability. Editorial relevance still matters, but reach and retention lead the ranking.'\n"
-        "    case 'podcast':\n"
-        "      return 'CURATION MODE: PODCAST. Prioritize self-contained stories, surprising admissions, strong opinions, disagreements, personal experiences, useful explanations, memorable lines and moments with a satisfying payoff. Do not select generic chatter just because delivery is energetic.'\n"
-        "    case 'insight':\n"
-        "      return 'CURATION MODE: INSIGHT. Prioritize ideas that teach something, explain a mechanism, challenge a common assumption, provide an actionable lesson, reveal a useful mental model or make a complex subject clear. Virality is secondary to genuine value.'\n"
-        "    case 'news':\n"
-        "      return 'CURATION MODE: NEWS. Prioritize genuinely new information: announcements, decisions, numbers, dates, changes, commitments, consequences, corrections and quotable statements by relevant people. Penalize old context, vague opinion and statements without a concrete news value.'\n"
-        "    case 'institutional':\n"
-        "      return 'CURATION MODE: INSTITUTIONAL. Prioritize public-interest information, decisions, policies, deadlines, services, investments, official announcements, accountability, concrete data and statements whose speaker has institutional relevance. Context integrity is critical: heavily penalize any cut that can mislead when separated from what came before or after.'\n"
-        "    case 'custom':\n"
-        "      return 'CURATION MODE: CUSTOM. The creator instructions below are the main selection objective. Still require every clip to be self-contained, accurate and structurally complete.'\n"
-        "  }\n"
-        "}\n\n"
-        "export function fraktallRankScore(\n"
-        "  mode: CurationMode,\n"
-        "  virality: number,\n"
-        "  editorial: number,\n"
-        "  contextIntegrity: number\n"
-        "): number {\n"
-        "  const weights: Record<CurationMode, [number, number, number]> = {\n"
-        "    viral: [0.65, 0.20, 0.15],\n"
-        "    podcast: [0.40, 0.40, 0.20],\n"
-        "    insight: [0.25, 0.55, 0.20],\n"
-        "    news: [0.20, 0.60, 0.20],\n"
-        "    institutional: [0.10, 0.65, 0.25],\n"
-        "    custom: [0.35, 0.45, 0.20]\n"
-        "  }\n"
-        "  const [v, e, c] = weights[mode]\n"
-        "  const integrityPenalty = contextIntegrity < 60 ? (60 - contextIntegrity) * 0.65 : 0\n"
-        "  return Math.max(0, Math.min(99, Math.round(virality * v + editorial * e + contextIntegrity * c - integrityPenalty)))\n"
-        "}\n""",
-        encoding="utf-8",
-    )
+    content = """import type { CurationMode } from './types'
+
+export const CURATION_OPTIONS: Array<{ value: CurationMode; label: string; hint: string }> = [
+  { value: 'viral', label: 'Viral', hint: 'Hook, emoção e compartilhamento' },
+  { value: 'podcast', label: 'Podcast', hint: 'Histórias, opiniões e momentos fortes' },
+  { value: 'insight', label: 'Insight', hint: 'Ideias, explicações e aprendizados' },
+  { value: 'news', label: 'Notícia', hint: 'Novidade, anúncio, dado e consequência' },
+  { value: 'institutional', label: 'Institucional', hint: 'Interesse público e relevância editorial' },
+  { value: 'custom', label: 'Personalizado', hint: 'Seu prompt define a prioridade' }
+]
+
+export function curationGuidance(mode: CurationMode): string {
+  switch (mode) {
+    case 'viral':
+      return 'CURATION MODE: VIRAL. Prioritize hooks, emotion, surprise, controversy, humour, practical value and shareability. Editorial relevance still matters, but reach and retention lead the ranking.'
+    case 'podcast':
+      return 'CURATION MODE: PODCAST. Prioritize self-contained stories, surprising admissions, strong opinions, disagreements, personal experiences, useful explanations, memorable lines and moments with a satisfying payoff. Do not select generic chatter just because delivery is energetic.'
+    case 'insight':
+      return 'CURATION MODE: INSIGHT. Prioritize ideas that teach something, explain a mechanism, challenge a common assumption, provide an actionable lesson, reveal a useful mental model or make a complex subject clear. Virality is secondary to genuine value.'
+    case 'news':
+      return 'CURATION MODE: NEWS. Prioritize genuinely new information: announcements, decisions, numbers, dates, changes, commitments, consequences, corrections and quotable statements by relevant people. Penalize old context, vague opinion and statements without a concrete news value.'
+    case 'institutional':
+      return 'CURATION MODE: INSTITUTIONAL. Prioritize public-interest information, decisions, policies, deadlines, services, investments, official announcements, accountability, concrete data and statements whose speaker has institutional relevance. Context integrity is critical: heavily penalize any cut that can mislead when separated from what came before or after.'
+    case 'custom':
+      return 'CURATION MODE: CUSTOM. The creator instructions below are the main selection objective. Still require every clip to be self-contained, accurate and structurally complete.'
+  }
+}
+
+export function fraktallRankScore(
+  mode: CurationMode,
+  virality: number,
+  editorial: number,
+  contextIntegrity: number
+): number {
+  const weights: Record<CurationMode, [number, number, number]> = {
+    viral: [0.65, 0.20, 0.15],
+    podcast: [0.40, 0.40, 0.20],
+    insight: [0.25, 0.55, 0.20],
+    news: [0.20, 0.60, 0.20],
+    institutional: [0.10, 0.65, 0.25],
+    custom: [0.35, 0.45, 0.20]
+  }
+  const [v, e, c] = weights[mode]
+  const integrityPenalty = contextIntegrity < 60 ? (60 - contextIntegrity) * 0.65 : 0
+  return Math.max(
+    0,
+    Math.min(99, Math.round(virality * v + editorial * e + contextIntegrity * c - integrityPenalty))
+  )
+}
+"""
+    path.write_text(content, encoding="utf-8")
 
 
 def patch_highlights(app: Path) -> None:
@@ -214,13 +215,51 @@ def patch_highlights(app: Path) -> None:
         "    curationGuidance(options.curationMode ?? 'podcast'),\n"
         "    insist",
     )
-    old_push = """    const typeDefaults = initialClipEditForVideoType(options.videoType)\n    clips.push({\n      id: randomUUID(),\n      suggestedStart: start,\n      suggestedEnd: end,\n      title: raw.title,\n      hook: raw.hook,\n      summary: raw.summary,\n      viralityScore: Math.max(0, Math.min(99, Math.round(raw.virality_score))),\n      viralityReason: raw.virality_reason,\n      visualSummary: null,"""
-    new_push = """    const typeDefaults = initialClipEditForVideoType(options.videoType)\n    const viralityScore = Math.max(0, Math.min(99, Math.round(raw.virality_score)))\n    const editorialScore = Math.max(0, Math.min(99, Math.round(raw.editorial_score ?? viralityScore)))\n    const contextIntegrityScore = Math.max(0, Math.min(99, Math.round(raw.context_integrity_score ?? 75)))\n    const selectionScore = fraktallRankScore(\n      options.curationMode ?? 'podcast',\n      viralityScore,\n      editorialScore,\n      contextIntegrityScore\n    )\n    clips.push({\n      id: randomUUID(),\n      suggestedStart: start,\n      suggestedEnd: end,\n      title: raw.title,\n      hook: raw.hook,\n      summary: raw.summary,\n      viralityScore,\n      viralityReason: raw.virality_reason,\n      editorialScore,\n      contextIntegrityScore,\n      editorialReason: raw.editorial_reason ?? '',\n      selectionScore,\n      visualSummary: null,"""
+    old_push = """    const typeDefaults = initialClipEditForVideoType(options.videoType)
+    clips.push({
+      id: randomUUID(),
+      suggestedStart: start,
+      suggestedEnd: end,
+      title: raw.title,
+      hook: raw.hook,
+      summary: raw.summary,
+      viralityScore: Math.max(0, Math.min(99, Math.round(raw.virality_score))),
+      viralityReason: raw.virality_reason,
+      visualSummary: null,"""
+    new_push = """    const typeDefaults = initialClipEditForVideoType(options.videoType)
+    const viralityScore = Math.max(0, Math.min(99, Math.round(raw.virality_score)))
+    const editorialScore = Math.max(0, Math.min(99, Math.round(raw.editorial_score ?? viralityScore)))
+    const contextIntegrityScore = Math.max(
+      0,
+      Math.min(99, Math.round(raw.context_integrity_score ?? 75))
+    )
+    const selectionScore = fraktallRankScore(
+      options.curationMode ?? 'podcast',
+      viralityScore,
+      editorialScore,
+      contextIntegrityScore
+    )
+    clips.push({
+      id: randomUUID(),
+      suggestedStart: start,
+      suggestedEnd: end,
+      title: raw.title,
+      hook: raw.hook,
+      summary: raw.summary,
+      viralityScore,
+      viralityReason: raw.virality_reason,
+      editorialScore,
+      contextIntegrityScore,
+      editorialReason: raw.editorial_reason ?? '',
+      selectionScore,
+      visualSummary: null,"""
     replace_once(path, old_push, new_push)
     replace_once(
         path,
         "  clips.sort((a, b) => b.viralityScore - a.viralityScore)",
-        "  clips.sort((a, b) => (b.selectionScore ?? b.viralityScore) - (a.selectionScore ?? a.viralityScore))",
+        "  clips.sort(\n"
+        "    (a, b) => (b.selectionScore ?? b.viralityScore) - (a.selectionScore ?? a.viralityScore)\n"
+        "  )",
     )
 
 
@@ -238,25 +277,29 @@ def patch_home(app: Path) -> None:
     )
     replace_once(
         path,
-        "  const [clipLength, setClipLength] = useState<ClipLengthPreference>('auto')\n  const [videoType, setVideoType]",
+        "  const [clipLength, setClipLength] = useState<ClipLengthPreference>('auto')\n"
+        "  const [videoType, setVideoType]",
         "  const [clipLength, setClipLength] = useState<ClipLengthPreference>('auto')\n"
         "  const [curationMode, setCurationMode] = useState<CurationMode>('podcast')\n"
         "  const [videoType, setVideoType]",
     )
-    curation_card = """
-            <div className=\"rounded-2xl border border-surface-700 bg-surface-900 p-5\">
-              <label className=\"flex items-center gap-2 text-sm font-semibold\">
-                <Sparkles size={15} className=\"text-accent-400\" />
+    ai_card_start = """            <div className="rounded-2xl border border-surface-700 bg-surface-900 p-5">
+              <label className="flex items-center gap-2 text-sm font-semibold">
+                <Wand2 size={15} className="text-accent-400" />
+                AI instructions"""
+    curation_card = """            <div className="rounded-2xl border border-surface-700 bg-surface-900 p-5">
+              <label className="flex items-center gap-2 text-sm font-semibold">
+                <Sparkles size={15} className="text-accent-400" />
                 Curadoria Fraktall
               </label>
-              <p className=\"mt-1 text-xs leading-relaxed text-zinc-500\">
+              <p className="mt-1 text-xs leading-relaxed text-zinc-500">
                 Define o que a IA considera um corte forte. Podcast é o padrão para entrevistas e conversas longas.
               </p>
-              <div className=\"mt-3 grid grid-cols-2 gap-2\">
+              <div className="mt-3 grid grid-cols-2 gap-2">
                 {CURATION_OPTIONS.map((opt) => (
                   <button
                     key={opt.value}
-                    type=\"button\"
+                    type="button"
                     onClick={() => setCurationMode(opt.value)}
                     className={`rounded-xl border px-3 py-2.5 text-left transition ${
                       curationMode === opt.value
@@ -264,34 +307,40 @@ def patch_home(app: Path) -> None:
                         : 'border-surface-600 bg-surface-850 text-zinc-400 hover:border-surface-600 hover:bg-surface-800'
                     }`}
                   >
-                    <div className=\"text-sm font-medium\">{opt.label}</div>
-                    <div className=\"mt-0.5 text-[11px] leading-snug text-zinc-500\">{opt.hint}</div>
+                    <div className="text-sm font-medium">{opt.label}</div>
+                    <div className="mt-0.5 text-[11px] leading-snug text-zinc-500">{opt.hint}</div>
                   </button>
                 ))}
               </div>
             </div>
 
 """
-    marker = """            <div className=\"rounded-2xl border border-surface-700 bg-surface-900 p-5\">\n              <label className=\"flex items-center gap-2 text-sm font-semibold\">\n                <Wand2 size={15} className=\"text-accent-400\" />\n                AI instructions"""
     text = path.read_text(encoding="utf-8")
-    if marker not in text:
-        raise RuntimeError("Could not find HomeScreen AI instructions card")
-    path.write_text(text.replace("            <div className=\"rounded-2xl border border-surface-700 bg-surface-900 p-5\">\n              <label className=\"flex items-center gap-2 text-sm font-semibold\">\n                <Wand2 size={15} className=\"text-accent-400\" />\n                AI instructions", curation_card + "            <div className=\"rounded-2xl border border-surface-700 bg-surface-900 p-5\">\n              <label className=\"flex items-center gap-2 text-sm font-semibold\">\n                <Wand2 size={15} className=\"text-accent-400\" />\n                AI instructions", 1), encoding="utf-8")
+    if text.count(ai_card_start) != 1:
+        raise RuntimeError("Could not find unique HomeScreen AI instructions card")
+    path.write_text(text.replace(ai_card_start, curation_card + ai_card_start, 1), encoding="utf-8")
     replace_once(
         path,
         "? void analyze({ prompt, clipLength, broll, hookFirst, videoType })",
         "? void analyze({ prompt, curationMode, clipLength, broll, hookFirst, videoType })",
     )
-    replace_once(path, "Drop in a podcast, webinar or stream. ClipForge transcribes it, finds the best moments", "Cole um podcast, entrevista ou vídeo longo. Fraktall transcreve, encontra os melhores momentos")
-    replace_once(path, "with AI, scores them for virality and renders caption-burned vertical clips.", "com IA, avalia valor editorial e gera cortes verticais legendados.")
+    replace_once(
+        path,
+        "Drop in a podcast, webinar or stream. ClipForge transcribes it, finds the best moments\n"
+        "        with AI, scores them for virality and renders caption-burned vertical clips.",
+        "Cole um podcast, entrevista ou vídeo longo. Fraktall transcreve, encontra os melhores momentos\n"
+        "        com IA, avalia valor editorial e gera cortes verticais legendados.",
+    )
 
 
 def patch_clips_screen(app: Path) -> None:
     path = app / "src/renderer/src/components/ClipsScreen.tsx"
     replace_once(
         path,
-        "              Ranked by virality score. Open a clip to trim, reframe and style captions before\n              exporting.",
-        "              Ranked by Fraktall score: virality, editorial value and context integrity. Open a clip\n              to trim, reframe and style captions before exporting.",
+        "              Ranked by virality score. Open a clip to trim, reframe and style captions before\n"
+        "              exporting.",
+        "              Ranked by Fraktall score: virality, editorial value and context integrity. Open a clip\n"
+        "              to trim, reframe and style captions before exporting.",
     )
     replace_once(
         path,
@@ -300,31 +349,43 @@ def patch_clips_screen(app: Path) -> None:
     )
     replace_once(
         path,
-        "        <div className=\"mt-2 line-clamp-1 text-[11px] text-zinc-500\">\n"
-        "          {clip.hashtags.map((h) => `#${h}`).join(' ')}\n"
-        "        </div>\n\n"
-        "        <div className=\"mt-3.5 flex items-center gap-2\">",
-        "        <div className=\"mt-2 flex flex-wrap gap-1.5 text-[10px] font-medium\">\n"
-        "          <span className=\"rounded-md border border-surface-600 px-1.5 py-0.5 text-zinc-400\">Viral {clip.viralityScore}</span>\n"
-        "          <span className=\"rounded-md border border-surface-600 px-1.5 py-0.5 text-zinc-400\">Editorial {clip.editorialScore ?? '—'}</span>\n"
-        "          <span className=\"rounded-md border border-surface-600 px-1.5 py-0.5 text-zinc-400\">Contexto {clip.contextIntegrityScore ?? '—'}</span>\n"
-        "        </div>\n"
-        "        {clip.editorialReason && (\n"
-        "          <p className=\"mt-2 line-clamp-2 text-[11px] leading-relaxed text-zinc-500\">{clip.editorialReason}</p>\n"
-        "        )}\n"
-        "        <div className=\"mt-2 line-clamp-1 text-[11px] text-zinc-500\">\n"
-        "          {clip.hashtags.map((h) => `#${h}`).join(' ')}\n"
-        "        </div>\n\n"
-        "        <div className=\"mt-3.5 flex items-center gap-2\">",
+        """        <div className="mt-2 line-clamp-1 text-[11px] text-zinc-500">
+          {clip.hashtags.map((h) => `#${h}`).join(' ')}
+        </div>
+
+        <div className="mt-3.5 flex items-center gap-2">""",
+        """        <div className="mt-2 flex flex-wrap gap-1.5 text-[10px] font-medium">
+          <span className="rounded-md border border-surface-600 px-1.5 py-0.5 text-zinc-400">
+            Viral {clip.viralityScore}
+          </span>
+          <span className="rounded-md border border-surface-600 px-1.5 py-0.5 text-zinc-400">
+            Editorial {clip.editorialScore ?? '—'}
+          </span>
+          <span className="rounded-md border border-surface-600 px-1.5 py-0.5 text-zinc-400">
+            Contexto {clip.contextIntegrityScore ?? '—'}
+          </span>
+        </div>
+        {clip.editorialReason && (
+          <p className="mt-2 line-clamp-2 text-[11px] leading-relaxed text-zinc-500">
+            {clip.editorialReason}
+          </p>
+        )}
+        <div className="mt-2 line-clamp-1 text-[11px] text-zinc-500">
+          {clip.hashtags.map((h) => `#${h}`).join(' ')}
+        </div>
+
+        <div className="mt-3.5 flex items-center gap-2">""",
     )
 
 
 def patch_branding(app: Path) -> None:
-    replace_once(app / "src/renderer/index.html", "<html lang=\"en\">", "<html lang=\"pt-BR\">")
-    replace_once(app / "src/renderer/index.html", "<title>ClipForge</title>", "<title>Fraktall</title>")
-    path = app / "src/renderer/src/components/TopBar.tsx"
-    replace_once(path, ">ClipForge</span>", ">Fraktall</span>")
-    replace_once(path, ">Open source</span>", ">Local AI</span>")
+    index_path = app / "src/renderer/index.html"
+    replace_once(index_path, '<html lang="en">', '<html lang="pt-BR">')
+    replace_once(index_path, "<title>ClipForge</title>", "<title>Fraktall</title>")
+
+    topbar = app / "src/renderer/src/components/TopBar.tsx"
+    replace_once(topbar, ">ClipForge</span>", ">Fraktall</span>")
+    replace_once(topbar, ">Open source</span>", ">Local AI</span>")
 
 
 def patch_updates(app: Path) -> None:
@@ -333,16 +394,17 @@ def patch_updates(app: Path) -> None:
     replace_once(
         path,
         "export function isSourceUpdateSupported(): boolean {\n  return !isAutoUpdateSupported()\n}",
-        "export function isSourceUpdateSupported(): boolean {\n  // Fraktall applies a reproducible patch over a pinned upstream checkout; never git-pull the nested upstream repo in-app.\n  return false\n}",
+        "export function isSourceUpdateSupported(): boolean {\n"
+        "  // Fraktall applies a reproducible patch over a pinned upstream checkout.\n"
+        "  return false\n"
+        "}",
     )
 
 
 def patch_debug_prefix(app: Path) -> None:
-    # Cosmetic only: keep upstream internals untouched elsewhere.
     path = app / "src/main/pipeline/openai.ts"
     text = path.read_text(encoding="utf-8")
-    text = text.replace("[clipforge]", "[fraktall]")
-    path.write_text(text, encoding="utf-8")
+    path.write_text(text.replace("[clipforge]", "[fraktall]"), encoding="utf-8")
 
 
 def main() -> None:
