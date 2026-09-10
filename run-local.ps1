@@ -64,10 +64,18 @@ $env:OPENAI_API_KEY = 'fraktall-local'
 $env:OPENAI_BASE_URL = 'http://127.0.0.1:11434/v1'
 $env:OPENAI_TRANSCRIPTION_BASE_URL = "http://127.0.0.1:$WhisperPort/v1"
 
+# Keep local-only defaults idempotently applied even when setup predates them.
+$localDefaults = Join-Path $Root 'apply_local_defaults.py'
+if (Test-Path $localDefaults) {
+  & $VenvPython $localDefaults --app $AppDir
+  if ($LASTEXITCODE -ne 0) { throw 'Could not apply Fraktall local defaults.' }
+}
+
 Write-Host "`nFraktall local stack ready" -ForegroundColor Green
 Write-Host "LLM:       Ollama / $OllamaModel"
 Write-Host "Whisper:   faster-whisper / $WhisperModel"
 Write-Host 'Language:  Portuguese'
+Write-Host 'Framing:   Podcast preset + active-speaker auto-reframe when faces are detected'
 Write-Host "`nStarting desktop app...`n" -ForegroundColor Cyan
 
 Push-Location $AppDir
