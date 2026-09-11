@@ -50,6 +50,11 @@ Planned pipeline:
 
 This is preferable for local models because large KV caches consume memory even when the model weights fit in VRAM.
 
+**Status: implemented for the remote worker path** (`worker/worker.py`,
+long-form segmentation + per-segment Shorts — see
+`docs/PRODUCT_DIRECTION.md`), not yet ported to the desktop/Ollama
+pipeline described elsewhere in this file.
+
 ## V0.3 — editorial intelligence
 
 - dedicated context-integrity second pass using before/after transcript

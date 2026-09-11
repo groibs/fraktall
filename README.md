@@ -19,6 +19,15 @@ Paste a YouTube/podcast URL or choose a local video and automatically generate r
 
 No Supabase, Vercel, login, billing or cloud storage are required for the personal desktop build.
 
+## Remote mode (web panel + local worker)
+
+A separate, actively developed mode lets you submit videos from a
+Vercel-hosted web panel (any device, no install) while all AI/video
+compute still runs for free on your own PC via a background worker. It's
+a hybrid, not a cloud SaaS — see `docs/PRODUCT_DIRECTION.md` for the
+architecture decision and editorial pipeline (long-form segmentation +
+Shorts per segment), and `docs/WEB_WORKER_MVP.md` for setup.
+
 ## Windows — easiest path
 
 Clone the repository:

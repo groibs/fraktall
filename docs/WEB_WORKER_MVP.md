@@ -24,14 +24,24 @@ LM Studio is never exposed to the public internet. The PC initiates outbound HTT
 ## What this MVP does
 
 - submit a YouTube/video URL from a Vercel-hosted dashboard;
-- select curation mode and requested clip count;
+- select curation mode and requested Shorts-per-segment count;
 - let a Windows worker claim the job;
-- download audio locally with yt-dlp;
-- transcribe with the existing local faster-whisper server;
-- analyze in bounded transcript chunks with LM Studio/Qwen3 1.7B using `/no_think`;
-- return ranked timestamps and virality/editorial/context scores to the web dashboard.
+- get a transcript the cheap way first — YouTube manual captions, then
+  auto-generated captions, then `youtube-transcript-api`, only downloading
+  audio and running local Whisper if all of those fail (see
+  `docs/PRODUCT_DIRECTION.md` §3);
+- map the video into long-form segments (10-30+min, semantic
+  start/development/conclusion, not fixed-length chopping);
+- for each selected long-form segment, find the Shorts within it;
+- return the long-form → Shorts hierarchy with virality/editorial/context/
+  potential scores to the web dashboard.
 
-The worker intentionally keeps first-pass output compact. It does not ask the model for large summaries/hashtags for every candidate, avoiding the 8192-token overflow observed in the desktop prototype.
+The worker intentionally keeps first-pass output compact (compact
+start/end/topic/scores, not full titles/hooks/descriptions for every
+candidate). It does not ask the model for large summaries for every
+candidate, avoiding the 8192-token overflow observed in the desktop
+prototype. See `docs/PRODUCT_DIRECTION.md` for the full editorial pipeline
+rationale.
 
 ## Not migrated yet
 
@@ -116,7 +126,43 @@ The launcher starts local Whisper if needed and waits for jobs. It does not open
 5. Keep the PC and LM Studio on.
 6. Watch the job stage/progress update in the dashboard.
 
-For the first remote test use a video around 5-10 minutes. Long podcasts are supported by chunking but should only be tested after the short path is validated.
+For the first remote test use a video around 5-10 minutes. Long podcasts are supported by chunking but should only be tested after the short path is validated. Use a video **over 12 minutes** to exercise the long-form segmentation pass itself (shorter videos are treated as one implicit long-form block).
+
+## Troubleshooting
+
+- **"Local Whisper failed to start" / `[Errno 10048]` address already in
+  use on port 8178** — a previous worker run's Whisper subprocess is still
+  alive (usually from closing the PowerShell window instead of Ctrl+C).
+  Kill it and retry:
+  ```powershell
+  Get-NetTCPConnection -LocalPort 8178 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess | ForEach-Object { Stop-Process -Id $_ -Force }
+  ```
+  Always stop `run-worker.ps1` with **Ctrl+C**, not by closing the window,
+  so it can clean up the Whisper subprocess itself.
+
+- **Whisper error `Library cublas64_12.dll is not found or cannot be
+  loaded`** — CUDA is being attempted but the cuBLAS/cuDNN runtime isn't
+  installed. Either run with `-WhisperDevice cpu`, or install the CUDA
+  wheels (no full CUDA Toolkit needed) and retry with
+  `-WhisperDevice cuda`:
+  ```powershell
+  .venv\Scripts\python.exe -m pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
+  ```
+  `local-whisper/server.py` auto-discovers these wheels' DLL directories on
+  Windows via `os.add_dll_directory`; no PATH edits needed.
+
+- **LM Studio model not found / `RemoteDisconnected` mid-job** — see
+  `docs/PRODUCT_DIRECTION.md` §4. `LMSTUDIO_MODEL` tolerates a near-match
+  to LM Studio's actual model id, but a crash mid-job on a small GPU
+  (4GB VRAM) usually means the loaded model is too large for the card; try
+  a smaller model (Qwen3 1.7B is the known-good default) before assuming
+  it's a bug.
+
+- **Editing `worker/.env.local` didn't change anything** — `run-worker.ps1`
+  now respects `WHISPER_MODEL` from the env file unless you pass
+  `-WhisperModel` explicitly on the command line, which always wins. Model
+  and device changes take effect on the **next** `run-worker.ps1` run, not
+  live.
 
 ## Security model
 
