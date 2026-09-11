@@ -55,10 +55,11 @@ Write-Host 'Installing/updating worker dependencies...' -ForegroundColor Cyan
 & $VenvPython -m pip install -q -r (Join-Path $WorkerDir 'requirements.txt')
 if ($LASTEXITCODE -ne 0) { throw 'Could not install worker dependencies.' }
 
-$env:WHISPER_MODEL = $WhisperModel
+if ($PSBoundParameters.ContainsKey('WhisperModel') -or -not $env:WHISPER_MODEL) {
+  $env:WHISPER_MODEL = $WhisperModel
+}
 $env:WHISPER_DEVICE = $WhisperDevice
 if (-not $env:WHISPER_BASE_URL) { $env:WHISPER_BASE_URL = "http://127.0.0.1:$WhisperPort/v1" }
-if (-not $env:WHISPER_MODEL) { $env:WHISPER_MODEL = $WhisperModel }
 
 $whisperProcess = $null
 if (-not (Test-Http "http://127.0.0.1:$WhisperPort/health")) {
