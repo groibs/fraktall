@@ -548,16 +548,19 @@ LONGFORM_SCHEMA: dict[str, Any] = {
 def analyze_longform_chunk(chunk: list[Segment], model_id: str) -> list[dict[str, Any]]:
     system = (
         "Você é o motor de decupagem do Fraktall. Analise uma janela de transcrição de um vídeo/podcast longo "
-        "e identifique blocos de assunto autônomos, adequados para virar um vídeo horizontal independente no YouTube. "
-        "Cada bloco precisa ter início natural de assunto, desenvolvimento e conclusão, e fazer sentido sozinho para "
-        "quem não viu o resto do vídeo. Blocos podem durar de poucos minutos a mais de 30 minutos — não force duração fixa "
-        "nem invente blocos fracos só para preencher quantidade. Retorne apenas JSON válido. Escreva topic e reason em português."
+        "e proponha candidatos a blocos de assunto que poderiam virar um vídeo horizontal independente no YouTube. "
+        "Um bom bloco tem início natural de assunto, desenvolvimento e conclusão, e faz sentido sozinho para quem não "
+        "viu o resto do vídeo — mas essa janela é só um pedaço do vídeo, então um assunto pode ter começado antes ou "
+        "continuar depois dela; proponha o melhor recorte possível dentro do que está visível aqui, mesmo que não seja "
+        "perfeito. Sempre proponha pelo menos 1 candidato quando houver qualquer conteúdo substancial na janela — "
+        "quem filtra qualidade é a pontuação depois, não você decidir omitir. Se um candidato for realmente fraco, "
+        "dê notas baixas em vez de não retornar nada. Blocos podem durar de poucos minutos a mais de 30 minutos. "
+        "Retorne apenas JSON válido. Escreva topic e reason em português."
     )
     prompt = (
-        "Identifique no máximo 4 blocos fortes nesta janela de transcrição. "
-        "Cada bloco deve cobrir começo, meio e fim de um mesmo assunto ou linha de raciocínio. "
+        "Proponha até 4 candidatos a bloco nesta janela de transcrição, do melhor para o pior. "
         "Dê editorial_score (qualidade do conteúdo), context_integrity_score (o bloco se sustenta sozinho sem o resto do vídeo) "
-        "e potential_score (potencial de audiência) de 0 a 99. "
+        "e potential_score (potencial de audiência) de 0 a 99 — seja honesto, inclusive com notas baixas quando for o caso. "
         "Use somente timestamps existentes na transcrição.\n\n"
         f"TRANSCRIÇÃO:\n{transcript_block(chunk)}"
     )
@@ -641,22 +644,54 @@ def select_longform_segments(candidates: list[dict[str, Any]], max_segments: int
     return kept
 
 
+def _whole_video_block(title: str, duration: float, reason: str) -> dict[str, Any]:
+    return {
+        "start": 0.0,
+        "end": round(duration, 2),
+        "topic": title,
+        "reason": reason,
+        "editorial_score": 60,
+        "context_integrity_score": 75,
+        "potential_score": 60,
+        "selection_score": 65,
+    }
+
+
+def longform_windows(
+    segments: list[Segment], window_seconds: float = 35 * 60, overlap_seconds: float = 6 * 60, max_chars: int = 18_000
+) -> list[list[Segment]]:
+    """Sliding, overlapping windows (unlike chunk_segments' back-to-back
+    chunks) so a topic near a window boundary is still fully visible in at
+    least one window instead of being split with neither half complete."""
+    if not segments:
+        return []
+    windows: list[list[Segment]] = []
+    video_start = segments[0].start
+    video_end = segments[-1].end
+    step = max(60.0, window_seconds - overlap_seconds)
+
+    window_start = video_start
+    while window_start < video_end:
+        window_end = window_start + window_seconds
+        window = [s for s in segments if s.end > window_start and s.start < window_end]
+        if window:
+            trimmed: list[Segment] = []
+            chars = 0
+            for seg in window:
+                trimmed.append(seg)
+                chars += len(seg.text) + 32
+                if chars > max_chars:
+                    break
+            windows.append(trimmed)
+        window_start += step
+    return windows
+
+
 def build_long_form_segments(segments: list[Segment], duration: float, title: str, model_id: str, report: Any) -> list[dict[str, Any]]:
     if duration <= LONGFORM_MIN_VIDEO_SECONDS:
-        return [
-            {
-                "start": 0.0,
-                "end": round(duration, 2),
-                "topic": title,
-                "reason": "Vídeo já é curto o suficiente para ser tratado como um único bloco.",
-                "editorial_score": 70,
-                "context_integrity_score": 90,
-                "potential_score": 70,
-                "selection_score": 75,
-            }
-        ]
+        return [_whole_video_block(title, duration, "Vídeo já é curto o suficiente para ser tratado como um único bloco.")]
 
-    lf_chunks = chunk_segments(segments, max_chars=14_000, max_seconds=35 * 60)
+    lf_chunks = longform_windows(segments)
     lf_candidates: list[dict[str, Any]] = []
     for index, chunk in enumerate(lf_chunks):
         report(
@@ -671,7 +706,17 @@ def build_long_form_segments(segments: list[Segment], duration: float, title: st
 
     report("Consolidando blocos longos", 62)
     lf_candidates = merge_adjacent_longform(lf_candidates)
-    return select_longform_segments(lf_candidates)
+    selected = select_longform_segments(lf_candidates)
+    if not selected:
+        print("[fraktall-worker] no long-form candidate survived filtering; falling back to whole-video block")
+        return [
+            _whole_video_block(
+                title,
+                duration,
+                "Nenhum bloco longo com contexto suficiente foi identificado separadamente; tratando o vídeo inteiro como um bloco.",
+            )
+        ]
+    return selected
 
 
 # ---------------------------------------------------------------------------
@@ -828,8 +873,6 @@ def process_job(job: dict[str, Any]) -> None:
             duration = segments[-1].end
 
         long_form_segments = build_long_form_segments(segments, duration, title, model_id, report)
-        if not long_form_segments:
-            raise RuntimeError("Nenhum bloco longo com contexto suficiente foi encontrado")
 
         report(f"Selecionados {len(long_form_segments)} vídeo(s) longo(s)", 65)
         for lf_index, lf in enumerate(long_form_segments):
