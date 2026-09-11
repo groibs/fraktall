@@ -4,3 +4,7 @@ app/
 *.log
 .DS_Store
 Thumbs.db
+web/.env.local
+worker/.env.local
+web/.next/
+web/node_modules/

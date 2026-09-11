@@ -50,4 +50,16 @@ jobs:
         run: npm run lint
 
       - name: Compile Python helpers
-        run: python -m py_compile local-whisper/server.py apply_patch.py apply_patch_runner.py apply_local_defaults.py
+        run: python -m py_compile local-whisper/server.py apply_patch.py apply_patch_runner.py apply_local_defaults.py worker/worker.py
+
+      - name: Install web dependencies
+        working-directory: web
+        run: npm install
+
+      - name: Build web console
+        working-directory: web
+        env:
+          SUPABASE_URL: https://example.supabase.co
+          SUPABASE_SERVICE_ROLE_KEY: test-service-role-key
+          FRAKTALL_ACCESS_TOKEN: test-access-token
+        run: npm run build
