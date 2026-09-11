@@ -30,7 +30,7 @@ jobs:
 
       - name: Apply Fraktall patch
         run: |
-          python apply_patch.py --app app
+          python apply_patch_runner.py --app app
           python apply_local_defaults.py --app app
 
       - name: Install Node dependencies
@@ -50,4 +50,4 @@ jobs:
         run: npm run lint
 
       - name: Compile Python helpers
-        run: python -m py_compile local-whisper/server.py apply_patch.py apply_local_defaults.py
+        run: python -m py_compile local-whisper/server.py apply_patch.py apply_patch_runner.py apply_local_defaults.py
