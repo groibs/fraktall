@@ -1,4 +1,4 @@
-app/
+/app/
 .venv/
 .runtime/
 *.log
@@ -8,3 +8,4 @@ web/.env.local
 worker/.env.local
 web/.next/
 web/node_modules/
+web/next-env.d.ts

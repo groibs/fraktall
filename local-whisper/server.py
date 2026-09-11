@@ -1,12 +1,38 @@
+import importlib.util
 import os
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from faster_whisper import WhisperModel
+
+
+def _register_cuda_dll_dirs() -> None:
+    """Make pip-installed NVIDIA CUDA/cuDNN wheels (nvidia-cublas-cu12,
+    nvidia-cudnn-cu12) discoverable on Windows without requiring a full
+    CUDA Toolkit install or editing the system PATH."""
+    if sys.platform != "win32":
+        return
+    try:
+        spec = importlib.util.find_spec("nvidia")
+        if spec is None or not spec.submodule_search_locations:
+            return
+        base = Path(next(iter(spec.submodule_search_locations)))
+        for bin_dir in base.glob("*/bin"):
+            try:
+                os.add_dll_directory(str(bin_dir))
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
+_register_cuda_dll_dirs()
 
 app = FastAPI(title="Fraktall Local Whisper")
 
@@ -32,7 +58,15 @@ def _load_model() -> WhisperModel:
 
     if _want_cuda():
         try:
-            _model = WhisperModel(model_name, device="cuda", compute_type="int8_float16")
+            candidate = WhisperModel(model_name, device="cuda", compute_type="int8_float16")
+            # ctranslate2 loads CUDA libraries (e.g. cuBLAS) lazily on first
+            # inference rather than at construction time, so a missing/broken
+            # CUDA install only surfaces here. Run a throwaway transcription
+            # now so that failure is caught and falls back to CPU, instead of
+            # surfacing as a 500 on the first real job.
+            silence = np.zeros(16000, dtype=np.float32)
+            list(candidate.transcribe(silence)[0])
+            _model = candidate
             _runtime = {
                 "model": model_name,
                 "device": "cuda",

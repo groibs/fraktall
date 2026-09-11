@@ -55,10 +55,16 @@ Write-Host 'Installing/updating worker dependencies...' -ForegroundColor Cyan
 & $VenvPython -m pip install -q -r (Join-Path $WorkerDir 'requirements.txt')
 if ($LASTEXITCODE -ne 0) { throw 'Could not install worker dependencies.' }
 
-$env:WHISPER_MODEL = $WhisperModel
+if ($PSBoundParameters.ContainsKey('WhisperModel') -or -not $env:WHISPER_MODEL) {
+  $env:WHISPER_MODEL = $WhisperModel
+}
 $env:WHISPER_DEVICE = $WhisperDevice
 if (-not $env:WHISPER_BASE_URL) { $env:WHISPER_BASE_URL = "http://127.0.0.1:$WhisperPort/v1" }
-if (-not $env:WHISPER_MODEL) { $env:WHISPER_MODEL = $WhisperModel }
+
+$RuntimeDir = Join-Path $Root '.runtime'
+if (-not (Test-Path $RuntimeDir)) { New-Item -ItemType Directory -Path $RuntimeDir | Out-Null }
+$WhisperLogOut = Join-Path $RuntimeDir 'whisper.out.log'
+$WhisperLogErr = Join-Path $RuntimeDir 'whisper.err.log'
 
 $whisperProcess = $null
 if (-not (Test-Http "http://127.0.0.1:$WhisperPort/health")) {
@@ -69,17 +75,23 @@ if (-not (Test-Http "http://127.0.0.1:$WhisperPort/health")) {
     -ArgumentList $whisperArgs `
     -WorkingDirectory $WhisperDir `
     -WindowStyle Hidden `
+    -RedirectStandardOutput $WhisperLogOut `
+    -RedirectStandardError $WhisperLogErr `
     -PassThru
 
-  for ($i = 0; $i -lt 45; $i++) {
+  for ($i = 0; $i -lt 120; $i++) {
     Start-Sleep -Seconds 1
     if (Test-Http "http://127.0.0.1:$WhisperPort/health") { break }
+    if ($whisperProcess.HasExited) { break }
   }
 }
 
 if (-not (Test-Http "http://127.0.0.1:$WhisperPort/health")) {
   if ($whisperProcess -and -not $whisperProcess.HasExited) { Stop-Process -Id $whisperProcess.Id -Force }
-  throw 'Local Whisper did not start on port 8178.'
+  Write-Host "`nLocal Whisper failed to start. Last log lines:" -ForegroundColor Red
+  if (Test-Path $WhisperLogErr) { Get-Content $WhisperLogErr -Tail 40 | Write-Host -ForegroundColor Red }
+  if (Test-Path $WhisperLogOut) { Get-Content $WhisperLogOut -Tail 40 | Write-Host -ForegroundColor Yellow }
+  throw "Local Whisper did not start on port 8178. Full logs: $WhisperLogErr"
 }
 
 Write-Host "`nFraktall Worker ready" -ForegroundColor Green

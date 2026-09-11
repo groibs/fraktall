@@ -63,6 +63,20 @@ FRAKTALL_ACCESS_TOKEN=choose-a-long-random-personal-token
 
 Deploy. The access token is the password entered in the Fraktall web dashboard; it prevents arbitrary visitors from creating or reading jobs.
 
+**Common pitfalls:**
+
+- If the deployed site doesn't load at all, double-check **Root Directory** in
+  Project Settings → General: it must be `web`, not the repo root or another
+  subfolder.
+- If the dashboard loads but every request returns "Não autorizado" (401),
+  the `FRAKTALL_ACCESS_TOKEN` (and `SUPABASE_*`) variables are usually missing
+  the **Production** environment checkbox — Vercel scopes each variable to
+  Production/Preview/Development independently, so a variable added while
+  testing a Preview deployment may not exist once you promote to Production.
+  Edit each variable, enable Production, then trigger a new deployment
+  (env var changes only take effect on deployments created after the change;
+  redeploying an existing deployment reuses its original snapshot).
+
 ## 3. Configure the Windows worker
 
 From `C:\dev\fraktall` after pulling this branch/change:
