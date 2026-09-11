@@ -13,6 +13,16 @@ type Clip = {
   context_integrity_score?: number
 }
 
+function formatTimestamp(seconds: number): string {
+  const total = Math.max(0, Math.round(seconds))
+  const h = Math.floor(total / 3600)
+  const m = Math.floor((total % 3600) / 60)
+  const s = total % 60
+  const mm = h > 0 ? String(m).padStart(2, '0') : String(m)
+  const ss = String(s).padStart(2, '0')
+  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`
+}
+
 type Job = {
   id: string
   source_url: string
@@ -155,7 +165,8 @@ export default function Home() {
                   <div className="clips">
                     {job.result.clips.slice(0, job.clip_count).map((clip, i) => (
                       <div className="clip" key={`${job.id}-${i}`}>
-                        <strong>{i + 1}. {clip.title || `${clip.start.toFixed(1)}s–${clip.end.toFixed(1)}s`}</strong>
+                        <strong>{i + 1}. {clip.title || 'Corte sugerido'}</strong>
+                        <div className="muted">{formatTimestamp(clip.start)} – {formatTimestamp(clip.end)}</div>
                         <div className="scores">
                           <span className="score">Total {clip.selection_score ?? '—'}</span>
                           <span className="score">Viral {clip.virality_score ?? '—'}</span>
