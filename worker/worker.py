@@ -186,7 +186,17 @@ def _extract_json_content(data: dict[str, Any]) -> dict[str, Any]:
         content = content.strip("`")
         if content.lower().startswith("json"):
             content = content[4:].lstrip()
-    return json.loads(content)
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        # Small local models occasionally wrap the JSON in stray prose even
+        # under a strict schema. Retry against just the outermost {...} span
+        # before giving up.
+        start = content.find("{")
+        end = content.rfind("}")
+        if start != -1 and end > start:
+            return json.loads(content[start : end + 1])
+        raise
 
 
 def _call_lmstudio(system: str, prompt: str, schema: dict[str, Any], schema_name: str, max_tokens: int, model_id: str) -> dict[str, Any]:
@@ -238,9 +248,21 @@ def _call_openai(system: str, prompt: str, schema: dict[str, Any], schema_name: 
 
 
 def call_llm(system: str, prompt: str, schema: dict[str, Any], schema_name: str, max_tokens: int, model_id: str) -> dict[str, Any]:
-    if LLM_PROVIDER == "openai":
-        return _call_openai(system, prompt, schema, schema_name, max_tokens)
-    return _call_lmstudio(system, prompt, schema, schema_name, max_tokens, model_id)
+    """A local model occasionally returns malformed JSON even under a strict
+    schema (truncation, a stray token). One retry recovers most of these
+    without giving up on a whole chunk's worth of analysis over a glitch."""
+    attempts = 2
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            if LLM_PROVIDER == "openai":
+                return _call_openai(system, prompt, schema, schema_name, max_tokens)
+            return _call_lmstudio(system, prompt, schema, schema_name, max_tokens, model_id)
+        except (json.JSONDecodeError, RuntimeError) as exc:
+            last_exc = exc
+            print(f"[fraktall-worker] LLM call failed (attempt {attempt + 1}/{attempts}): {exc}")
+    assert last_exc is not None
+    raise last_exc
 
 
 # ---------------------------------------------------------------------------
@@ -698,7 +720,11 @@ def build_long_form_segments(segments: list[Segment], duration: float, title: st
             f"Mapeando assuntos: bloco {index + 1}/{len(lf_chunks)}",
             40 + round((index / max(1, len(lf_chunks))) * 20),
         )
-        raw = analyze_longform_chunk(chunk, model_id)
+        try:
+            raw = analyze_longform_chunk(chunk, model_id)
+        except Exception as exc:
+            print(f"[fraktall-worker] long-form chunk {index + 1}/{len(lf_chunks)} failed, skipping it: {exc}")
+            continue
         for item in raw:
             normalized = normalize_longform_candidate(item, duration)
             if normalized:
@@ -840,7 +866,11 @@ def shorts_for_longform(
     candidate_per_chunk = max(2, min(5, math.ceil(shorts_wanted / max(1, len(chunks))) + 1))
     candidates: list[dict[str, Any]] = []
     for chunk in chunks:
-        raw_candidates = analyze_chunk(chunk, mode, candidate_per_chunk, model_id, longform_topic=longform.get("topic"))
+        try:
+            raw_candidates = analyze_chunk(chunk, mode, candidate_per_chunk, model_id, longform_topic=longform.get("topic"))
+        except Exception as exc:
+            print(f"[fraktall-worker] shorts chunk for {longform.get('topic')!r} failed, skipping it: {exc}")
+            continue
         for raw in raw_candidates:
             normalized = normalize_candidate(raw, mode, longform["end"], min_start=longform["start"])
             if normalized:
