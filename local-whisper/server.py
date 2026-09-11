@@ -4,6 +4,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from faster_whisper import WhisperModel
@@ -32,7 +33,15 @@ def _load_model() -> WhisperModel:
 
     if _want_cuda():
         try:
-            _model = WhisperModel(model_name, device="cuda", compute_type="int8_float16")
+            candidate = WhisperModel(model_name, device="cuda", compute_type="int8_float16")
+            # ctranslate2 loads CUDA libraries (e.g. cuBLAS) lazily on first
+            # inference rather than at construction time, so a missing/broken
+            # CUDA install only surfaces here. Run a throwaway transcription
+            # now so that failure is caught and falls back to CPU, instead of
+            # surfacing as a 500 on the first real job.
+            silence = np.zeros(16000, dtype=np.float32)
+            list(candidate.transcribe(silence)[0])
+            _model = candidate
             _runtime = {
                 "model": model_name,
                 "device": "cuda",
