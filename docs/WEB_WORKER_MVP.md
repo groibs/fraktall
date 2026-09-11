@@ -43,21 +43,33 @@ candidate, avoiding the 8192-token overflow observed in the desktop
 prototype. See `docs/PRODUCT_DIRECTION.md` for the full editorial pipeline
 rationale.
 
+## Rendering: basic downloadable Shorts (no reframe/captions yet)
+
+When `RENDER_CLIPS=1` (the default), the worker downloads the full source
+video once per job (only if at least one Short was selected), cuts each
+selected Short with `ffmpeg` (via the bundled `imageio-ffmpeg`, no system
+install needed), and uploads it to a `clips` bucket in Supabase Storage. Each
+Short gets a 7-day signed download URL shown in the dashboard as "Baixar
+corte". This is a straight center crop at the source aspect ratio — no
+active-speaker reframing, no burned-in captions yet.
+
 ## Not migrated yet
 
 - remote video preview;
 - face/speaker tracking in the worker;
-- final vertical rendering;
-- caption burn-in;
-- storage/delivery of rendered MP4 files.
+- 9:16 reframing and caption burn-in;
+- long-form (horizontal) rendering — only Shorts are rendered today.
 
-Those remain in the desktop engine until the next phase. The next migration step is to move the existing render/reframe modules behind the worker and upload only final clips/previews to object storage.
+Those remain in the desktop engine until the next phase, which is to move
+the existing render/reframe modules behind the worker.
 
 ## 1. Create the queue
 
 Create a dedicated Supabase project. Open SQL Editor and run `infra/supabase.sql`.
 
 Keep the **service-role key private**. It belongs only in Vercel server-side environment variables and on the local worker. It must never be exposed as `NEXT_PUBLIC_*`.
+
+To enable downloadable clips, also create a Storage bucket (Supabase dashboard → **Storage → New bucket**): name it `clips`, leave it **private** (not public — the worker hands out signed, expiring URLs instead). No bucket policies are needed; the worker uses the service-role key, which bypasses Storage RLS.
 
 ## 2. Configure Vercel
 
@@ -110,6 +122,39 @@ WHISPER_LANGUAGE=pt
 ```
 
 Start LM Studio, load Qwen3 1.7B and start Local Server on port 1234. Then run:
+
+## Using OpenAI instead of local LM Studio/Whisper
+
+Every local AI step is behind a provider switch, independently:
+
+```text
+LLM_PROVIDER=openai
+OPENAI_API_KEY=sk-...
+OPENAI_MODEL=gpt-4o-mini
+
+TRANSCRIPTION_PROVIDER=openai
+OPENAI_TRANSCRIBE_MODEL=whisper-1
+```
+
+With both set, the worker no longer touches LM Studio or local Whisper at
+all — it still runs locally (it downloads the source and drives the
+pipeline), but every AI call goes to OpenAI's API. This removes every local
+GPU/VRAM/CUDA failure mode this project has hit so far, at the cost of
+paying OpenAI per video processed. `TRANSCRIPTION_PROVIDER` only matters
+when no YouTube caption track is found — most videos never reach it.
+
+OpenAI's transcription endpoint rejects uploads over 25MB; the worker
+automatically splits long audio into 15-minute chunks with `ffmpeg` before
+uploading and stitches the timestamps back together, so long videos work
+the same as short ones from the caller's side.
+
+A cloud-hosted worker (so nothing runs on your PC at all) is a much bigger
+step than switching providers — Vercel serverless functions have hard
+execution-time limits (minutes, not hours), so a multi-hour video wouldn't
+fit in one invocation regardless of which AI provider does the work. The
+worker staying local (even when every AI call is remote) is the practical
+choice until that's solved with its own infrastructure (a real queue-driven
+cloud worker, not a Vercel function).
 
 ```powershell
 .\run-worker.ps1

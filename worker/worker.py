@@ -4,6 +4,7 @@ import json
 import math
 import os
 import socket
+import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
@@ -26,10 +27,18 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip()
 
+TRANSCRIPTION_PROVIDER = os.environ.get("TRANSCRIPTION_PROVIDER", "whisper_local").strip().lower()
+OPENAI_TRANSCRIBE_MODEL = os.environ.get("OPENAI_TRANSCRIBE_MODEL", "whisper-1").strip()
 WHISPER_BASE_URL = os.environ.get("WHISPER_BASE_URL", "http://127.0.0.1:8178/v1").rstrip("/")
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small").strip()
 WHISPER_LANGUAGE = os.environ.get("WHISPER_LANGUAGE", "pt").strip()
 POLL_SECONDS = max(1.0, float(os.environ.get("POLL_SECONDS", "3")))
+RENDER_CLIPS = os.environ.get("RENDER_CLIPS", "1").strip() not in ("0", "false", "no")
+
+# OpenAI's transcription endpoint rejects uploads over 25MB; split audio
+# safely under that instead of guessing a bitrate that fits.
+OPENAI_TRANSCRIBE_MAX_BYTES = 24 * 1024 * 1024
+OPENAI_TRANSCRIBE_CHUNK_SECONDS = 15 * 60
 
 # Below this, a video is short enough that splitting it into multiple
 # "long-form" segments would be artificial busywork; treat it as one block.
@@ -311,6 +320,83 @@ def download_audio(source_url: str, job_id: str) -> tuple[Path, dict[str, Any], 
     return filename, info, tmp
 
 
+def download_video(source_url: str, work_dir: Path) -> Path:
+    """Downloads the full source video (capped at 1080p) so selected Shorts
+    can be cut from it. Only called once per job, and only when at least one
+    Short was actually selected — most jobs never need this."""
+    outtmpl = str(work_dir / "source_video.%(ext)s")
+    opts: dict[str, Any] = {
+        "format": "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
+        "outtmpl": outtmpl,
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "retries": 3,
+        "socket_timeout": 30,
+        "merge_output_format": "mp4",
+        "ffmpeg_location": _ffmpeg_path(),
+    }
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(source_url, download=True)
+        filename = Path(ydl.prepare_filename(info))
+
+    if not filename.exists():
+        candidates = [p for p in work_dir.iterdir() if p.is_file() and p.name.startswith("source_video")]
+        if not candidates:
+            raise RuntimeError("yt-dlp finished but no video file was found")
+        filename = max(candidates, key=lambda p: p.stat().st_size)
+    return filename
+
+
+def cut_clip(video_path: Path, start: float, end: float, out_path: Path) -> None:
+    duration = max(0.5, end - start)
+    subprocess.run(
+        [
+            _ffmpeg_path(), "-y",
+            "-ss", f"{start:.2f}",
+            "-i", str(video_path),
+            "-t", f"{duration:.2f}",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-c:a", "aac", "-b:a", "128k",
+            str(out_path),
+        ],
+        check=True, capture_output=True, timeout=300,
+    )
+
+
+def upload_to_storage(local_path: Path, remote_path: str) -> str:
+    """Uploads to the 'clips' Supabase Storage bucket (must exist already,
+    see docs/WEB_WORKER_MVP.md) and returns a 7-day signed URL the browser
+    can download directly. The service-role key bypasses bucket RLS."""
+    with local_path.open("rb") as handle:
+        res = SESSION.post(
+            f"{SUPABASE_URL}/storage/v1/object/clips/{remote_path}",
+            headers={
+                "apikey": SUPABASE_KEY,
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+                "Content-Type": "video/mp4",
+                "x-upsert": "true",
+            },
+            data=handle.read(),
+            timeout=180,
+        )
+    if not res.ok:
+        raise RuntimeError(f"Storage upload failed: HTTP {res.status_code} {res.text[:500]}")
+
+    sign_res = SESSION.post(
+        f"{SUPABASE_URL}/storage/v1/object/sign/clips/{remote_path}",
+        headers=_supa_headers(),
+        json={"expiresIn": 60 * 60 * 24 * 7},
+        timeout=30,
+    )
+    if not sign_res.ok:
+        raise RuntimeError(f"Storage sign failed: HTTP {sign_res.status_code} {sign_res.text[:500]}")
+    signed_path = sign_res.json().get("signedURL")
+    if not signed_path:
+        raise RuntimeError("Storage sign response missing signedURL")
+    return f"{SUPABASE_URL}/storage/v1{signed_path}"
+
+
 def _pick_caption_track(source: dict[str, Any], language: str) -> dict[str, Any] | None:
     prefix = language.split("-")[0].lower()
     matches = [formats for code, formats in source.items() if formats and code.split("-")[0].lower() == prefix]
@@ -466,14 +552,20 @@ def fetch_transcript(
         return segments, info, source_key, None
 
     report("Nenhuma legenda disponível — baixando áudio", 12)
-    check_whisper()
     audio_path, info, temp = download_audio(source_url, job_id)
-    report("Transcrevendo com Whisper local", 20)
-    transcript = transcribe(audio_path)
+    if TRANSCRIPTION_PROVIDER == "openai":
+        report("Transcrevendo com a API da OpenAI", 20)
+        transcript = transcribe_openai(audio_path)
+        source_key = "openai_whisper"
+    else:
+        check_whisper()
+        report("Transcrevendo com Whisper local", 20)
+        transcript = transcribe(audio_path)
+        source_key = "whisper_local"
     segments = to_segments(transcript)
     if not segments:
-        raise RuntimeError("Whisper returned no transcript segments")
-    return segments, info, "whisper_local", temp
+        raise RuntimeError("Transcription returned no segments")
+    return segments, info, source_key, temp
 
 
 def transcribe(audio_path: Path) -> dict[str, Any]:
@@ -495,6 +587,75 @@ def transcribe(audio_path: Path) -> dict[str, Any]:
     if body.get("error"):
         raise RuntimeError(f"Whisper failed: {body['error']}")
     return body
+
+
+def _ffmpeg_path() -> str:
+    import imageio_ffmpeg
+
+    return imageio_ffmpeg.get_ffmpeg_exe()
+
+
+def _split_audio_for_upload(audio_path: Path) -> list[Path]:
+    """OpenAI rejects uploads over 25MB. Split into fixed-length chunks with
+    ffmpeg's segment muxer (stream copy, no re-encode) when the file is
+    large enough that a multi-hour recording could exceed the limit."""
+    if audio_path.stat().st_size <= OPENAI_TRANSCRIBE_MAX_BYTES:
+        return [audio_path]
+
+    pattern = str(audio_path.parent / f"{audio_path.stem}.part%03d{audio_path.suffix}")
+    subprocess.run(
+        [
+            _ffmpeg_path(), "-y", "-i", str(audio_path),
+            "-f", "segment", "-segment_time", str(OPENAI_TRANSCRIBE_CHUNK_SECONDS),
+            "-c", "copy", "-reset_timestamps", "1",
+            pattern,
+        ],
+        check=True, capture_output=True, timeout=600,
+    )
+    parts = sorted(audio_path.parent.glob(f"{audio_path.stem}.part*{audio_path.suffix}"))
+    return parts or [audio_path]
+
+
+def _transcribe_openai_chunk(audio_path: Path) -> dict[str, Any]:
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is required when TRANSCRIPTION_PROVIDER=openai")
+    with audio_path.open("rb") as handle:
+        res = SESSION.post(
+            f"{OPENAI_BASE_URL}/audio/transcriptions",
+            files={"file": (audio_path.name, handle, "application/octet-stream")},
+            data={
+                "model": OPENAI_TRANSCRIBE_MODEL,
+                "response_format": "verbose_json",
+                "language": WHISPER_LANGUAGE,
+            },
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+            timeout=10 * 60,
+        )
+    if not res.ok:
+        raise RuntimeError(f"OpenAI transcription failed: HTTP {res.status_code} {res.text[:500]}")
+    return res.json()
+
+
+def transcribe_openai(audio_path: Path) -> dict[str, Any]:
+    parts = _split_audio_for_upload(audio_path)
+    all_segments: list[dict[str, Any]] = []
+    full_text: list[str] = []
+    total_duration = 0.0
+    for index, part in enumerate(parts):
+        offset = index * OPENAI_TRANSCRIBE_CHUNK_SECONDS
+        body = _transcribe_openai_chunk(part)
+        for seg in body.get("segments") or []:
+            all_segments.append(
+                {
+                    **seg,
+                    "start": float(seg.get("start") or 0.0) + offset,
+                    "end": float(seg.get("end") or 0.0) + offset,
+                }
+            )
+        if body.get("text"):
+            full_text.append(str(body["text"]))
+        total_duration = max(total_duration, offset + float(body.get("duration") or 0.0))
+    return {"text": " ".join(full_text), "segments": all_segments, "duration": total_duration, "language": WHISPER_LANGUAGE}
 
 
 def to_segments(transcript: dict[str, Any]) -> list[Segment]:
@@ -869,6 +1030,37 @@ def select_best(candidates: list[dict[str, Any]], clip_count: int) -> list[dict[
     return kept
 
 
+def render_shorts(long_form_segments: list[dict[str, Any]], source_url: str, job_id: str, report: Any) -> None:
+    """Downloads the source video once and cuts+uploads every selected Short,
+    setting short['download_url'] in place. Best-effort: a failure here
+    leaves the job's curation result intact, just without download links."""
+    if not any(lf.get("shorts") for lf in long_form_segments):
+        return
+
+    render_dir = tempfile.TemporaryDirectory(prefix=f"fraktall-render-{job_id[:8]}-")
+    try:
+        report("Baixando vídeo para renderizar cortes", 96)
+        video_path = download_video(source_url, Path(render_dir.name))
+
+        total = sum(len(lf.get("shorts") or []) for lf in long_form_segments)
+        done = 0
+        for lf_index, lf in enumerate(long_form_segments):
+            for s_index, short in enumerate(lf.get("shorts") or []):
+                done += 1
+                report(f"Renderizando corte {done}/{total}", 96 + round((done / max(1, total)) * 3))
+                try:
+                    out_path = Path(render_dir.name) / f"short_{lf_index}_{s_index}.mp4"
+                    cut_clip(video_path, short["start"], short["end"], out_path)
+                    remote_path = f"{job_id}/short_{lf_index}_{s_index}.mp4"
+                    short["download_url"] = upload_to_storage(out_path, remote_path)
+                except Exception as exc:
+                    print(f"[fraktall-worker] failed to render short {lf_index}/{s_index}: {exc}")
+    except Exception as exc:
+        print(f"[fraktall-worker] video render step failed, continuing without downloads: {exc}")
+    finally:
+        render_dir.cleanup()
+
+
 def shorts_for_longform(
     segments: list[Segment], longform: dict[str, Any], mode: str, shorts_wanted: int, model_id: str
 ) -> list[dict[str, Any]]:
@@ -925,6 +1117,9 @@ def process_job(job: dict[str, Any]) -> None:
                 65 + round((lf_index / max(1, len(long_form_segments))) * 30),
             )
             lf["shorts"] = shorts_for_longform(segments, lf, mode, shorts_wanted, model_id)
+
+        if RENDER_CLIPS:
+            render_shorts(long_form_segments, source_url, job_id, report)
 
         result = {
             "title": title,

@@ -11,6 +11,7 @@ type Short = {
   virality_score?: number
   editorial_score?: number
   context_integrity_score?: number
+  download_url?: string
 }
 
 type LongForm = {
@@ -105,6 +106,9 @@ function ShortCard({ short, index }: { short: Short; index: number }) {
         <span className="score">Editorial {short.editorial_score ?? '—'}</span>
         <span className="score">Contexto {short.context_integrity_score ?? '—'}</span>
       </div>
+      {short.download_url && (
+        <a className="download" href={short.download_url} target="_blank" rel="noreferrer">Baixar corte</a>
+      )}
     </div>
   )
 }
