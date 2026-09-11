@@ -12,9 +12,9 @@ It is:
 
 ```
 browser → Vercel (panel) → Supabase (queue) → local worker on the user's PC
-          ↑                                    ├─ LM Studio (LLM)
-          └────────────── result ──────────────┼─ local Whisper (fallback)
-                                                 └─ FFmpeg (future: render)
+          ↑                                    ├─ LM Studio or OpenAI (LLM)
+          └────────────── result ──────────────┼─ local Whisper or OpenAI (transcription fallback)
+                                                 └─ FFmpeg (Shorts cut + upload to Supabase Storage)
 ```
 
 - The **panel** (submit form, job list, worker status) is public and always
@@ -108,20 +108,39 @@ Internal source keys: `youtube_manual`, `youtube_auto`,
   are used for every LLM call (both long-form and Shorts passes) to avoid
   the earlier failure mode where an unbounded prompt made the model
   reason at length, overflow context, and get truncated/retried.
+- Even after fixing the context-window sizing and adding retries (see
+  `docs/WEB_WORKER_MVP.md` troubleshooting), repeated local-model crashes
+  on real long videos are why OpenAI was added as a selectable provider
+  (`LLM_PROVIDER=openai`, `TRANSCRIPTION_PROVIDER=openai` — see §1 and
+  `docs/WEB_WORKER_MVP.md`) instead of continuing to chase local GPU
+  stability. This doesn't change the architecture decision in §1 — the
+  worker still runs locally either way — it only changes which side of
+  the outbound HTTPS calls the AI compute happens on, and is opt-in
+  (local LM Studio/Whisper remain the free default).
 
 ## 5. Explicitly deferred to a later phase
 
-- Rendering (FFmpeg horizontal/vertical export), face tracking,
-  active-speaker reframing, caption burn-in. The desktop engine
-  (`app/`, ClipForge-derived) already has working versions of these; the
-  plan is to extract and reuse that logic behind the worker, not rebuild
-  it. Until then, `long_form[].shorts[]` gives timestamps only — no
-  rendered files.
+- Face tracking, active-speaker 9:16 reframing, caption burn-in. Basic
+  16:9-crop Shorts rendering (ffmpeg cut, no reframe) shipped — see
+  `docs/WEB_WORKER_MVP.md` — but the desktop engine's (`app/`,
+  ClipForge-derived) reframe/caption logic is still not wired into the
+  worker; extracting and reusing it is the plan, not a rebuild.
+- Long-form (horizontal) rendering — only Shorts are rendered today.
 - Structured Qwen 1.7B vs 4B A/B benchmarking (timing, token counts,
   candidate quality) beyond what a human can eyeball from two runs. The
   transcript-source metadata pattern (record it in `result`, show it in
   the dashboard) is the template to extend for this if it's wanted later.
-- Any cloud-compute/SaaS pivot (see §1) — not happening this phase.
+- **Moving the worker itself into the cloud** (so nothing runs on the
+  user's PC at all). Moving *which AI provider does the analysis/
+  transcription* to OpenAI (§4) is a config switch and doesn't change
+  where the worker runs — it's still a local process downloading the
+  source and driving the pipeline. Actually hosting that orchestration in
+  the cloud (e.g. as a Vercel-triggered job) hits a hard platform
+  constraint: Vercel serverless functions have execution-time limits on
+  the order of minutes, not hours, so a multi-hour video's download +
+  transcription + analysis + render wouldn't fit in one invocation
+  regardless of provider. This needs real queue-driven infrastructure
+  (not a Vercel function) to do properly, and hasn't been built.
 
 ## 6. Where this came from
 
