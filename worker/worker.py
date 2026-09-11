@@ -67,16 +67,30 @@ def _supa_headers(prefer: str | None = None) -> dict[str, str]:
 
 
 def _supa(method: str, path: str, *, json_body: Any | None = None, prefer: str | None = None) -> requests.Response:
-    res = SESSION.request(
-        method,
-        f"{SUPABASE_URL}/rest/v1/{path}",
-        headers=_supa_headers(prefer),
-        json=json_body,
-        timeout=30,
-    )
-    if not res.ok:
-        raise RuntimeError(f"Supabase {method} {path} failed: HTTP {res.status_code} {res.text[:500]}")
-    return res
+    """A transient network hiccup here (Wi-Fi blip, a long-running job's
+    connection dropping) must not throw away hours of processing on an
+    otherwise-successful job. Retry connection-level failures; a genuine
+    HTTP error status (bad request, auth, etc.) is not retried."""
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            res = SESSION.request(
+                method,
+                f"{SUPABASE_URL}/rest/v1/{path}",
+                headers=_supa_headers(prefer),
+                json=json_body,
+                timeout=30,
+            )
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+            last_exc = exc
+            print(f"[fraktall-worker] Supabase {method} {path} connection failed (attempt {attempt + 1}/3): {exc}")
+            time.sleep(2.0 * (attempt + 1))
+            continue
+        if not res.ok:
+            raise RuntimeError(f"Supabase {method} {path} failed: HTTP {res.status_code} {res.text[:500]}")
+        return res
+    assert last_exc is not None
+    raise last_exc
 
 
 def _now_iso() -> str:
@@ -258,7 +272,7 @@ def call_llm(system: str, prompt: str, schema: dict[str, Any], schema_name: str,
             if LLM_PROVIDER == "openai":
                 return _call_openai(system, prompt, schema, schema_name, max_tokens)
             return _call_lmstudio(system, prompt, schema, schema_name, max_tokens, model_id)
-        except (json.JSONDecodeError, RuntimeError) as exc:
+        except (json.JSONDecodeError, RuntimeError, requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
             last_exc = exc
             print(f"[fraktall-worker] LLM call failed (attempt {attempt + 1}/{attempts}): {exc}")
     assert last_exc is not None
@@ -680,7 +694,7 @@ def _whole_video_block(title: str, duration: float, reason: str) -> dict[str, An
 
 
 def longform_windows(
-    segments: list[Segment], window_seconds: float = 35 * 60, overlap_seconds: float = 6 * 60, max_chars: int = 18_000
+    segments: list[Segment], window_seconds: float = 35 * 60, overlap_seconds: float = 6 * 60, max_chars: int = 9_000
 ) -> list[list[Segment]]:
     """Sliding, overlapping windows (unlike chunk_segments' back-to-back
     chunks) so a topic near a window boundary is still fully visible in at
