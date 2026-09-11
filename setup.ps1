@@ -47,14 +47,19 @@ function Test-Http([string]$Url) {
 
 function Resolve-Python {
   if (Have 'py') {
-    foreach ($version in @('3.12', '3.11', '3.10')) {
-      try {
-        & py "-$version" -c "import sys; print(sys.executable)" | Out-Null
-        if ($LASTEXITCODE -eq 0) { return @('py', "-$version") }
-      } catch {}
+    foreach ($version in @('3.11', '3.12', '3.10')) {
+      & py "-$version" -c "import sys" *> $null
+      if ($LASTEXITCODE -eq 0) { return @('py', "-$version") }
     }
   }
-  if (Have 'python') { return @('python') }
+
+  if (Have 'python') {
+    try {
+      $minor = (& python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null).Trim()
+      if ($minor -in @('3.10', '3.11', '3.12')) { return @('python') }
+    } catch {}
+  }
+
   return $null
 }
 
@@ -75,14 +80,14 @@ Ensure-WingetPackage 'node' 'OpenJS.NodeJS.LTS'
 
 $pythonCmd = Resolve-Python
 if ($null -eq $pythonCmd) {
-  if (-not (Have 'winget')) { throw 'Python 3.10+ is required.' }
+  if (-not (Have 'winget')) { throw 'Python 3.10, 3.11 or 3.12 is required.' }
   Write-Host 'Installing Python 3.11...' -ForegroundColor Cyan
   winget install --id Python.Python.3.11 -e --silent --accept-source-agreements --accept-package-agreements
   Refresh-Path
   $pythonCmd = Resolve-Python
 }
 if ($null -eq $pythonCmd) {
-  throw 'Python installation was not detected. Reopen PowerShell and rerun setup.ps1.'
+  throw 'Python 3.11 was not detected. Close PowerShell, reopen it and rerun setup.ps1.'
 }
 
 if (-not $SkipOllama) {
@@ -130,7 +135,7 @@ if (Test-Path (Join-Path $AppDir '.git')) {
 }
 
 Write-Host 'Applying Fraktall patches...' -ForegroundColor Cyan
-Invoke-PythonScript (Join-Path $Root 'apply_patch.py') @('--app', $AppDir)
+Invoke-PythonScript (Join-Path $Root 'apply_patch_runner.py') @('--app', $AppDir)
 Invoke-PythonScript (Join-Path $Root 'apply_local_defaults.py') @('--app', $AppDir)
 
 Write-Host 'Installing desktop app dependencies...' -ForegroundColor Cyan
