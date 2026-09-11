@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import requests
 import yt_dlp
@@ -17,12 +18,22 @@ import yt_dlp
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 WORKER_ID = os.environ.get("FRAKTALL_WORKER_ID", socket.gethostname()).strip() or socket.gethostname()
+
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "lmstudio").strip().lower()
 LMSTUDIO_BASE_URL = os.environ.get("LMSTUDIO_BASE_URL", "http://127.0.0.1:1234/v1").rstrip("/")
 LMSTUDIO_MODEL = os.environ.get("LMSTUDIO_MODEL", "qwen/qwen3-1.7b").strip()
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip()
+
 WHISPER_BASE_URL = os.environ.get("WHISPER_BASE_URL", "http://127.0.0.1:8178/v1").rstrip("/")
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small").strip()
 WHISPER_LANGUAGE = os.environ.get("WHISPER_LANGUAGE", "pt").strip()
 POLL_SECONDS = max(1.0, float(os.environ.get("POLL_SECONDS", "3")))
+
+# Below this, a video is short enough that splitting it into multiple
+# "long-form" segments would be artificial busywork; treat it as one block.
+LONGFORM_MIN_VIDEO_SECONDS = 12 * 60
 
 SESSION = requests.Session()
 
@@ -82,6 +93,7 @@ def heartbeat(status: str = "idle", current_job: str | None = None) -> None:
         "current_job": current_job,
         "last_seen": _now_iso(),
         "metadata": {
+            "llm_provider": LLM_PROVIDER,
             "lmstudio_model": LMSTUDIO_MODEL,
             "lmstudio_base": LMSTUDIO_BASE_URL,
             "whisper_model": WHISPER_MODEL,
@@ -135,21 +147,106 @@ def claim_next_job() -> dict[str, Any] | None:
     return claimed_rows[0] if claimed_rows else None
 
 
-def check_lmstudio() -> None:
+def resolve_llm_model() -> str:
+    """Returns the model id to send in LLM requests. For LM Studio, tolerates
+    LMSTUDIO_MODEL not matching a loaded model's id verbatim (LM Studio's
+    reported ids can differ slightly from a user's config) by falling back to
+    a substring match."""
+    if LLM_PROVIDER == "openai":
+        if not OPENAI_API_KEY:
+            raise RuntimeError("OPENAI_API_KEY is required when LLM_PROVIDER=openai")
+        return OPENAI_MODEL
+
     lm = SESSION.get(f"{LMSTUDIO_BASE_URL}/models", timeout=10)
     if not lm.ok:
         raise RuntimeError(f"LM Studio is unavailable: HTTP {lm.status_code}")
-    ids = {m.get("id") for m in lm.json().get("data", [])}
-    if LMSTUDIO_MODEL not in ids:
-        raise RuntimeError(
-            f"LM Studio model {LMSTUDIO_MODEL!r} is not available. Loaded/known models: {sorted(x for x in ids if x)}"
-        )
+    ids = [m.get("id") for m in lm.json().get("data", []) if m.get("id")]
+    if LMSTUDIO_MODEL in ids:
+        return LMSTUDIO_MODEL
+
+    wanted = LMSTUDIO_MODEL.lower()
+    for candidate in ids:
+        if wanted in candidate.lower() or candidate.lower() in wanted:
+            print(f"[fraktall-worker] LMSTUDIO_MODEL={LMSTUDIO_MODEL!r} not loaded verbatim; using {candidate!r}")
+            return candidate
+    raise RuntimeError(
+        f"LM Studio model {LMSTUDIO_MODEL!r} is not available. Loaded models: {sorted(x for x in ids if x)}"
+    )
 
 
 def check_whisper() -> None:
     whisper = SESSION.get(WHISPER_BASE_URL.rsplit("/v1", 1)[0] + "/health", timeout=10)
     if not whisper.ok:
         raise RuntimeError(f"Local Whisper is unavailable: HTTP {whisper.status_code}")
+
+
+def _extract_json_content(data: dict[str, Any]) -> dict[str, Any]:
+    content = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+    if content.startswith("```"):
+        content = content.strip("`")
+        if content.lower().startswith("json"):
+            content = content[4:].lstrip()
+    return json.loads(content)
+
+
+def _call_lmstudio(system: str, prompt: str, schema: dict[str, Any], schema_name: str, max_tokens: int, model_id: str) -> dict[str, Any]:
+    body = {
+        "model": model_id,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+            {"role": "user", "content": "/no_think"},
+        ],
+        "temperature": 0.1,
+        "max_tokens": max_tokens,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": schema_name, "strict": True, "schema": schema},
+        },
+    }
+    res = SESSION.post(f"{LMSTUDIO_BASE_URL}/chat/completions", json=body, timeout=10 * 60)
+    if not res.ok:
+        raise RuntimeError(f"LM Studio failed: HTTP {res.status_code} {res.text[:500]}")
+    return _extract_json_content(res.json())
+
+
+def _call_openai(system: str, prompt: str, schema: dict[str, Any], schema_name: str, max_tokens: int) -> dict[str, Any]:
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is required when LLM_PROVIDER=openai")
+    body = {
+        "model": OPENAI_MODEL,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.1,
+        "max_tokens": max_tokens,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": schema_name, "strict": True, "schema": schema},
+        },
+    }
+    res = SESSION.post(
+        f"{OPENAI_BASE_URL}/chat/completions",
+        json=body,
+        headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+        timeout=5 * 60,
+    )
+    if not res.ok:
+        raise RuntimeError(f"OpenAI failed: HTTP {res.status_code} {res.text[:500]}")
+    return _extract_json_content(res.json())
+
+
+def call_llm(system: str, prompt: str, schema: dict[str, Any], schema_name: str, max_tokens: int, model_id: str) -> dict[str, Any]:
+    if LLM_PROVIDER == "openai":
+        return _call_openai(system, prompt, schema, schema_name, max_tokens)
+    return _call_lmstudio(system, prompt, schema, schema_name, max_tokens, model_id)
+
+
+# ---------------------------------------------------------------------------
+# Transcript acquisition: prefer YouTube's own captions (free, instant) over
+# downloading audio and running local Whisper (slow, needs a GPU/CPU budget).
+# ---------------------------------------------------------------------------
 
 
 def download_audio(source_url: str, job_id: str) -> tuple[Path, dict[str, Any], tempfile.TemporaryDirectory[str]]:
@@ -178,24 +275,16 @@ def download_audio(source_url: str, job_id: str) -> tuple[Path, dict[str, Any], 
     return filename, info, tmp
 
 
-def _pick_caption_track(info: dict[str, Any], language: str) -> dict[str, Any] | None:
-    """Prefer a human-written track over YouTube's own auto-generated one,
-    and prefer the json3 format (structured cues) when the track offers it."""
+def _pick_caption_track(source: dict[str, Any], language: str) -> dict[str, Any] | None:
     prefix = language.split("-")[0].lower()
-    for source in (info.get("subtitles") or {}, info.get("automatic_captions") or {}):
-        matches = [
-            formats
-            for code, formats in source.items()
-            if formats and code.split("-")[0].lower() == prefix
-        ]
-        if not matches:
-            continue
-        formats = matches[0]
-        for fmt in formats:
-            if fmt.get("ext") == "json3":
-                return fmt
-        return formats[0]
-    return None
+    matches = [formats for code, formats in source.items() if formats and code.split("-")[0].lower() == prefix]
+    if not matches:
+        return None
+    formats = matches[0]
+    for fmt in formats:
+        if fmt.get("ext") == "json3":
+            return fmt
+    return formats[0]
 
 
 def _parse_json3_captions(data: dict[str, Any]) -> list[Segment]:
@@ -214,11 +303,9 @@ def _parse_json3_captions(data: dict[str, Any]) -> list[Segment]:
     return segments
 
 
-def fetch_captions(source_url: str, language: str) -> tuple[list[Segment], dict[str, Any]] | None:
-    """Try to reuse YouTube's own subtitles/auto-captions instead of
-    downloading audio and running local Whisper. Much faster and free
-    when available; callers must fall back to Whisper when this returns
-    None (captions disabled, wrong language, or the fetch failed)."""
+def fetch_youtube_captions(source_url: str, language: str) -> tuple[list[Segment], dict[str, Any], str] | None:
+    """Reuses YouTube's own subtitle tracks without downloading audio/video.
+    Tries a human-written (manual) track before the auto-generated one."""
     opts: dict[str, Any] = {
         "skip_download": True,
         "quiet": True,
@@ -229,18 +316,128 @@ def fetch_captions(source_url: str, language: str) -> tuple[list[Segment], dict[
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(source_url, download=False)
 
-    track = _pick_caption_track(info, language)
-    if track is None or not track.get("url"):
+    for bucket_key, source_key in (("subtitles", "youtube_manual"), ("automatic_captions", "youtube_auto")):
+        track = _pick_caption_track(info.get(bucket_key) or {}, language)
+        if track is None or not track.get("url"):
+            continue
+        res = SESSION.get(track["url"], timeout=30)
+        if not res.ok:
+            continue
+        segments = _parse_json3_captions(res.json())
+        if segments:
+            return segments, info, source_key
+    return None
+
+
+def _extract_youtube_id(source_url: str) -> str | None:
+    parsed = urlparse(source_url)
+    host = parsed.hostname or ""
+    if host in ("youtu.be", "www.youtu.be"):
+        video_id = parsed.path.lstrip("/")
+        return video_id or None
+    if "youtube.com" in host:
+        if parsed.path == "/watch":
+            values = parse_qs(parsed.query).get("v")
+            return values[0] if values else None
+        parts = [p for p in parsed.path.split("/") if p]
+        if len(parts) >= 2 and parts[0] in ("shorts", "live", "embed"):
+            return parts[1]
+    return None
+
+
+def _fetch_video_metadata(source_url: str) -> dict[str, Any]:
+    opts: dict[str, Any] = {"skip_download": True, "quiet": True, "no_warnings": True, "retries": 2, "socket_timeout": 20}
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        return ydl.extract_info(source_url, download=False) or {}
+
+
+def fetch_via_youtube_transcript_api(source_url: str, language: str) -> tuple[list[Segment], dict[str, Any], str] | None:
+    """Independent second implementation of caption fetching (different
+    library/maintainer than yt-dlp), used as redundancy when yt-dlp's own
+    caption extraction fails or YouTube changes something it doesn't handle
+    yet. Never raises; a bad or missing dependency just skips this tier."""
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+    except ImportError:
         return None
 
-    res = SESSION.get(track["url"], timeout=30)
-    if not res.ok:
+    video_id = _extract_youtube_id(source_url)
+    if not video_id:
         return None
 
-    segments = _parse_json3_captions(res.json())
+    prefix = language.split("-")[0].lower()
+    langs = [prefix] if language == prefix else [prefix, language]
+
+    raw: Any = None
+    try:
+        raw = YouTubeTranscriptApi().fetch(video_id, languages=langs)
+    except AttributeError:
+        try:
+            raw = YouTubeTranscriptApi.get_transcript(video_id, languages=langs)
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+    segments: list[Segment] = []
+    for item in raw or []:
+        if isinstance(item, dict):
+            text, start, dur = item.get("text"), item.get("start"), item.get("duration")
+        else:
+            text = getattr(item, "text", None)
+            start = getattr(item, "start", None)
+            dur = getattr(item, "duration", None)
+        text = str(text or "").strip()
+        if not text or start is None:
+            continue
+        segments.append(Segment(start=float(start), end=float(start) + float(dur or 2.0), text=text))
+
     if not segments:
         return None
-    return segments, info
+
+    try:
+        info = _fetch_video_metadata(source_url)
+    except Exception:
+        info = {}
+    return segments, info, "youtube_transcript_api"
+
+
+def fetch_transcript(
+    source_url: str, language: str, job_id: str, report: Any
+) -> tuple[list[Segment], dict[str, Any], str, tempfile.TemporaryDirectory[str] | None]:
+    """Cascade: YouTube captions (manual/auto, via yt-dlp) -> youtube-transcript-api
+    -> Whisper local. Only downloads audio when every faster option fails."""
+    report("Procurando legendas do YouTube", 6)
+    try:
+        result = fetch_youtube_captions(source_url, language)
+    except Exception as exc:
+        result = None
+        print(f"[fraktall-worker] yt-dlp caption fetch failed: {exc}")
+    if result:
+        segments, info, source_key = result
+        report(f"Legenda encontrada ({source_key})", 30)
+        return segments, info, source_key, None
+
+    report("Tentando transcript alternativo", 10)
+    try:
+        result = fetch_via_youtube_transcript_api(source_url, language)
+    except Exception as exc:
+        result = None
+        print(f"[fraktall-worker] youtube-transcript-api failed: {exc}")
+    if result:
+        segments, info, source_key = result
+        report("Transcript recuperado por fallback", 30)
+        return segments, info, source_key, None
+
+    report("Nenhuma legenda disponível — baixando áudio", 12)
+    check_whisper()
+    audio_path, info, temp = download_audio(source_url, job_id)
+    report("Transcrevendo com Whisper local", 20)
+    transcript = transcribe(audio_path)
+    segments = to_segments(transcript)
+    if not segments:
+        raise RuntimeError("Whisper returned no transcript segments")
+    return segments, info, "whisper_local", temp
 
 
 def transcribe(audio_path: Path) -> dict[str, Any]:
@@ -318,6 +515,169 @@ def transcript_block(chunk: list[Segment]) -> str:
     return "\n".join(f"[{s.start:.1f}s - {s.end:.1f}s] {s.text}" for s in chunk)
 
 
+# ---------------------------------------------------------------------------
+# Pass 1: long-form segmentation (semantic topic map over the whole video).
+# ---------------------------------------------------------------------------
+
+LONGFORM_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["segments"],
+    "properties": {
+        "segments": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["start", "end", "topic", "reason", "editorial_score", "context_integrity_score", "potential_score"],
+                "properties": {
+                    "start": {"type": "number"},
+                    "end": {"type": "number"},
+                    "topic": {"type": "string"},
+                    "reason": {"type": "string"},
+                    "editorial_score": {"type": "integer"},
+                    "context_integrity_score": {"type": "integer"},
+                    "potential_score": {"type": "integer"},
+                },
+            },
+        }
+    },
+}
+
+
+def analyze_longform_chunk(chunk: list[Segment], model_id: str) -> list[dict[str, Any]]:
+    system = (
+        "Você é o motor de decupagem do Fraktall. Analise uma janela de transcrição de um vídeo/podcast longo "
+        "e identifique blocos de assunto autônomos, adequados para virar um vídeo horizontal independente no YouTube. "
+        "Cada bloco precisa ter início natural de assunto, desenvolvimento e conclusão, e fazer sentido sozinho para "
+        "quem não viu o resto do vídeo. Blocos podem durar de poucos minutos a mais de 30 minutos — não force duração fixa "
+        "nem invente blocos fracos só para preencher quantidade. Retorne apenas JSON válido. Escreva topic e reason em português."
+    )
+    prompt = (
+        "Identifique no máximo 4 blocos fortes nesta janela de transcrição. "
+        "Cada bloco deve cobrir começo, meio e fim de um mesmo assunto ou linha de raciocínio. "
+        "Dê editorial_score (qualidade do conteúdo), context_integrity_score (o bloco se sustenta sozinho sem o resto do vídeo) "
+        "e potential_score (potencial de audiência) de 0 a 99. "
+        "Use somente timestamps existentes na transcrição.\n\n"
+        f"TRANSCRIÇÃO:\n{transcript_block(chunk)}"
+    )
+    data = call_llm(system, prompt, LONGFORM_SCHEMA, "fraktall_longform", 900, model_id)
+    return list(data.get("segments") or [])
+
+
+def clamp_score(value: Any, fallback: int = 0) -> int:
+    try:
+        return max(0, min(99, int(round(float(value)))))
+    except Exception:
+        return fallback
+
+
+def overlap_fraction(a: dict[str, Any], b: dict[str, Any]) -> float:
+    overlap = min(a["end"], b["end"]) - max(a["start"], b["start"])
+    if overlap <= 0:
+        return 0.0
+    return overlap / min(a["end"] - a["start"], b["end"] - b["start"])
+
+
+def normalize_longform_candidate(raw: dict[str, Any], duration: float) -> dict[str, Any] | None:
+    try:
+        start = max(0.0, min(float(raw.get("start")), max(0.0, duration - 30)))
+        end = max(start + 30, min(float(raw.get("end")), duration))
+    except Exception:
+        return None
+    if end - start < 60:
+        return None
+
+    editorial = clamp_score(raw.get("editorial_score"), 50)
+    context = clamp_score(raw.get("context_integrity_score"), 70)
+    potential = clamp_score(raw.get("potential_score"), 50)
+    return {
+        "start": round(start, 2),
+        "end": round(end, 2),
+        "topic": str(raw.get("topic") or "Bloco sugerido").strip()[:160],
+        "reason": str(raw.get("reason") or "").strip()[:500],
+        "editorial_score": editorial,
+        "context_integrity_score": context,
+        "potential_score": potential,
+        "selection_score": round(editorial * 0.45 + context * 0.25 + potential * 0.3),
+    }
+
+
+def merge_adjacent_longform(candidates: list[dict[str, Any]], gap_seconds: float = 15.0) -> list[dict[str, Any]]:
+    """Chunk boundaries are arbitrary, so one real topic can be split across
+    two adjacent candidates. Merge candidates that touch or nearly touch."""
+    ordered = sorted(candidates, key=lambda c: c["start"])
+    merged: list[dict[str, Any]] = []
+    for cand in ordered:
+        if merged and cand["start"] - merged[-1]["end"] <= gap_seconds:
+            prev = merged[-1]
+            if cand["selection_score"] > prev["selection_score"]:
+                prev["topic"] = cand["topic"]
+                prev["reason"] = cand["reason"]
+            prev["end"] = max(prev["end"], cand["end"])
+            prev["editorial_score"] = max(prev["editorial_score"], cand["editorial_score"])
+            prev["context_integrity_score"] = min(prev["context_integrity_score"], cand["context_integrity_score"])
+            prev["potential_score"] = max(prev["potential_score"], cand["potential_score"])
+            prev["selection_score"] = round(
+                prev["editorial_score"] * 0.45 + prev["context_integrity_score"] * 0.25 + prev["potential_score"] * 0.3
+            )
+        else:
+            merged.append(dict(cand))
+    return merged
+
+
+def select_longform_segments(candidates: list[dict[str, Any]], max_segments: int = 12) -> list[dict[str, Any]]:
+    ordered = sorted(candidates, key=lambda c: (c["selection_score"], c["context_integrity_score"]), reverse=True)
+    kept: list[dict[str, Any]] = []
+    for candidate in ordered:
+        if candidate["context_integrity_score"] < 55:
+            continue
+        if any(overlap_fraction(candidate, existing) > 0.3 for existing in kept):
+            continue
+        kept.append(candidate)
+        if len(kept) >= max_segments:
+            break
+    kept.sort(key=lambda c: c["start"])
+    return kept
+
+
+def build_long_form_segments(segments: list[Segment], duration: float, title: str, model_id: str, report: Any) -> list[dict[str, Any]]:
+    if duration <= LONGFORM_MIN_VIDEO_SECONDS:
+        return [
+            {
+                "start": 0.0,
+                "end": round(duration, 2),
+                "topic": title,
+                "reason": "Vídeo já é curto o suficiente para ser tratado como um único bloco.",
+                "editorial_score": 70,
+                "context_integrity_score": 90,
+                "potential_score": 70,
+                "selection_score": 75,
+            }
+        ]
+
+    lf_chunks = chunk_segments(segments, max_chars=14_000, max_seconds=35 * 60)
+    lf_candidates: list[dict[str, Any]] = []
+    for index, chunk in enumerate(lf_chunks):
+        report(
+            f"Mapeando assuntos: bloco {index + 1}/{len(lf_chunks)}",
+            40 + round((index / max(1, len(lf_chunks))) * 20),
+        )
+        raw = analyze_longform_chunk(chunk, model_id)
+        for item in raw:
+            normalized = normalize_longform_candidate(item, duration)
+            if normalized:
+                lf_candidates.append(normalized)
+
+    report("Consolidando blocos longos", 62)
+    lf_candidates = merge_adjacent_longform(lf_candidates)
+    return select_longform_segments(lf_candidates)
+
+
+# ---------------------------------------------------------------------------
+# Pass 2: shorts derived from each selected long-form segment.
+# ---------------------------------------------------------------------------
+
 CANDIDATE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -352,14 +712,16 @@ CANDIDATE_SCHEMA: dict[str, Any] = {
 }
 
 
-def analyze_chunk(chunk: list[Segment], mode: str, candidate_count: int) -> list[dict[str, Any]]:
+def analyze_chunk(chunk: list[Segment], mode: str, candidate_count: int, model_id: str, longform_topic: str | None = None) -> list[dict[str, Any]]:
+    context_line = f"Este trecho faz parte de um vídeo mais longo sobre: {longform_topic}\n\n" if longform_topic else ""
     system = (
-        "Você é o motor editorial do Fraktall. Selecione cortes verticais a partir de uma transcrição. "
+        "Você é o motor editorial do Fraktall. Selecione cortes verticais (Shorts/Reels) a partir de uma transcrição. "
         "Cada corte precisa ser entendível por um espectador frio, começar e terminar em um pensamento natural e preservar o contexto. "
         "Não escolha falas de ligação, perguntas soltas sem resposta, trechos curtos demais ou frases que dependem do que veio antes. "
         "Retorne apenas JSON válido. Escreva title e reason em português."
     )
     prompt = (
+        f"{context_line}"
         f"Modo de curadoria: {mode}. {curation_guidance(mode)}\n\n"
         f"Escolha no máximo {candidate_count} candidatos fortes neste bloco. "
         "Idealmente cada corte deve ter entre 20 e 90 segundos, mas complete o pensamento antes de obedecer duração. "
@@ -367,38 +729,8 @@ def analyze_chunk(chunk: list[Segment], mode: str, candidate_count: int) -> list
         "Use somente timestamps existentes na transcrição.\n\n"
         f"TRANSCRIÇÃO:\n{transcript_block(chunk)}"
     )
-    body = {
-        "model": LMSTUDIO_MODEL,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": prompt},
-            {"role": "user", "content": "/no_think"},
-        ],
-        "temperature": 0.1,
-        "max_tokens": 950,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {"name": "fraktall_candidates", "strict": True, "schema": CANDIDATE_SCHEMA},
-        },
-    }
-    res = SESSION.post(f"{LMSTUDIO_BASE_URL}/chat/completions", json=body, timeout=10 * 60)
-    if not res.ok:
-        raise RuntimeError(f"LM Studio failed: HTTP {res.status_code} {res.text[:500]}")
-    data = res.json()
-    content = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
-    if content.startswith("```"):
-        content = content.strip("`")
-        if content.lower().startswith("json"):
-            content = content[4:].lstrip()
-    parsed = json.loads(content)
-    return list(parsed.get("clips") or [])
-
-
-def clamp_score(value: Any, fallback: int = 0) -> int:
-    try:
-        return max(0, min(99, int(round(float(value)))))
-    except Exception:
-        return fallback
+    data = call_llm(system, prompt, CANDIDATE_SCHEMA, "fraktall_candidates", 950, model_id)
+    return list(data.get("clips") or [])
 
 
 def rank_score(mode: str, viral: int, editorial: int, context: int) -> int:
@@ -414,10 +746,10 @@ def rank_score(mode: str, viral: int, editorial: int, context: int) -> int:
     return max(0, min(99, round(viral * v + editorial * e + context * c - penalty)))
 
 
-def normalize_candidate(raw: dict[str, Any], mode: str, duration: float) -> dict[str, Any] | None:
+def normalize_candidate(raw: dict[str, Any], mode: str, max_end: float, min_start: float = 0.0) -> dict[str, Any] | None:
     try:
-        start = max(0.0, min(float(raw.get("start")), max(0.0, duration - 0.5)))
-        end = max(start + 0.5, min(float(raw.get("end")), duration))
+        start = max(min_start, min(float(raw.get("start")), max(min_start, max_end - 0.5)))
+        end = max(start + 0.5, min(float(raw.get("end")), max_end))
     except Exception:
         return None
     if end - start < 8:
@@ -438,13 +770,6 @@ def normalize_candidate(raw: dict[str, Any], mode: str, duration: float) -> dict
     }
 
 
-def overlap_fraction(a: dict[str, Any], b: dict[str, Any]) -> float:
-    overlap = min(a["end"], b["end"]) - max(a["start"], b["start"])
-    if overlap <= 0:
-        return 0.0
-    return overlap / min(a["end"] - a["start"], b["end"] - b["start"])
-
-
 def select_best(candidates: list[dict[str, Any]], clip_count: int) -> list[dict[str, Any]]:
     ordered = sorted(candidates, key=lambda c: (c["selection_score"], c["context_integrity_score"]), reverse=True)
     kept: list[dict[str, Any]] = []
@@ -459,74 +784,72 @@ def select_best(candidates: list[dict[str, Any]], clip_count: int) -> list[dict[
     return kept
 
 
+def shorts_for_longform(
+    segments: list[Segment], longform: dict[str, Any], mode: str, shorts_wanted: int, model_id: str
+) -> list[dict[str, Any]]:
+    scoped = [s for s in segments if s.end > longform["start"] and s.start < longform["end"]]
+    if not scoped:
+        return []
+
+    chunks = chunk_segments(scoped)
+    candidate_per_chunk = max(2, min(5, math.ceil(shorts_wanted / max(1, len(chunks))) + 1))
+    candidates: list[dict[str, Any]] = []
+    for chunk in chunks:
+        raw_candidates = analyze_chunk(chunk, mode, candidate_per_chunk, model_id, longform_topic=longform.get("topic"))
+        for raw in raw_candidates:
+            normalized = normalize_candidate(raw, mode, longform["end"], min_start=longform["start"])
+            if normalized:
+                candidates.append(normalized)
+    return select_best(candidates, shorts_wanted)
+
+
 def process_job(job: dict[str, Any]) -> None:
     job_id = str(job["id"])
     source_url = str(job["source_url"])
     mode = str(job.get("curation_mode") or "podcast")
-    clip_count = max(1, min(40, int(job.get("clip_count") or 8)))
+    shorts_wanted = max(1, min(10, int(job.get("clip_count") or 3)))
     temp: tempfile.TemporaryDirectory[str] | None = None
+
+    def report(stage: str, progress: int) -> None:
+        update_job(job_id, stage=stage, progress=progress)
 
     try:
         heartbeat("running", job_id)
-        update_job(job_id, status="running", stage="Validando serviços locais", progress=4, started_at=_now_iso(), error=None)
-        check_lmstudio()
+        update_job(job_id, status="running", stage="Validando serviços locais", progress=2, started_at=_now_iso(), error=None)
+        model_id = resolve_llm_model()
 
-        update_job(job_id, stage="Procurando legendas do YouTube", progress=8)
-        segments: list[Segment] = []
-        info: dict[str, Any] = {}
-        try:
-            captions_result = fetch_captions(source_url, WHISPER_LANGUAGE)
-        except Exception as exc:
-            captions_result = None
-            print(f"[fraktall-worker] caption fetch failed, falling back to Whisper: {exc}")
-
-        if captions_result:
-            segments, info = captions_result
-            update_job(job_id, stage="Legendas do YouTube encontradas", progress=35)
-        else:
-            check_whisper()
-            update_job(job_id, stage="Baixando áudio", progress=8)
-            audio_path, info, temp = download_audio(source_url, job_id)
-
-            update_job(job_id, stage="Transcrevendo com Whisper local", progress=20)
-            transcript = transcribe(audio_path)
-            segments = to_segments(transcript)
-            if not segments:
-                raise RuntimeError("Whisper returned no transcript segments")
+        transcript_started = time.monotonic()
+        segments, info, transcript_source, temp = fetch_transcript(source_url, WHISPER_LANGUAGE, job_id, report)
+        transcript_fetch_seconds = round(time.monotonic() - transcript_started, 2)
 
         duration = float(info.get("duration") or 0.0)
         title = str(info.get("title") or source_url)
         if duration <= 0:
             duration = segments[-1].end
 
-        chunks = chunk_segments(segments)
-        candidate_per_chunk = max(2, min(5, math.ceil(clip_count / max(1, len(chunks))) + 1))
-        all_candidates: list[dict[str, Any]] = []
+        long_form_segments = build_long_form_segments(segments, duration, title, model_id, report)
+        if not long_form_segments:
+            raise RuntimeError("Nenhum bloco longo com contexto suficiente foi encontrado")
 
-        for index, chunk in enumerate(chunks):
-            pct = 40 + round((index / max(1, len(chunks))) * 48)
-            update_job(
-                job_id,
-                stage=f"Analisando bloco {index + 1}/{len(chunks)} no LM Studio",
-                progress=min(88, pct),
+        report(f"Selecionados {len(long_form_segments)} vídeo(s) longo(s)", 65)
+        for lf_index, lf in enumerate(long_form_segments):
+            report(
+                f"Buscando shorts do vídeo {lf_index + 1}/{len(long_form_segments)}",
+                65 + round((lf_index / max(1, len(long_form_segments))) * 30),
             )
-            raw_candidates = analyze_chunk(chunk, mode, candidate_per_chunk)
-            for raw in raw_candidates:
-                normalized = normalize_candidate(raw, mode, duration)
-                if normalized:
-                    all_candidates.append(normalized)
+            lf["shorts"] = shorts_for_longform(segments, lf, mode, shorts_wanted, model_id)
 
-        update_job(job_id, stage="Rankeando e removendo duplicados", progress=92)
-        selected = select_best(all_candidates, clip_count)
         result = {
             "title": title,
             "source_url": source_url,
             "duration": round(duration, 2),
             "curation_mode": mode,
-            "transcript_source": "youtube_captions" if captions_result else "whisper",
-            "chunks_analyzed": len(chunks),
-            "candidates_considered": len(all_candidates),
-            "clips": selected,
+            "transcript": {
+                "source": transcript_source,
+                "language": WHISPER_LANGUAGE,
+                "fetch_seconds": transcript_fetch_seconds,
+            },
+            "long_form": long_form_segments,
         }
         update_job(
             job_id,
@@ -536,7 +859,8 @@ def process_job(job: dict[str, Any]) -> None:
             result=result,
             finished_at=_now_iso(),
         )
-        print(f"[fraktall-worker] done {job_id}: {len(selected)} clips from {len(all_candidates)} candidates")
+        total_shorts = sum(len(lf.get("shorts") or []) for lf in long_form_segments)
+        print(f"[fraktall-worker] done {job_id}: {len(long_form_segments)} long-form segments, {total_shorts} shorts")
     except Exception as exc:
         print(f"[fraktall-worker] job {job_id} failed: {exc}")
         try:
@@ -561,7 +885,7 @@ def process_job(job: dict[str, Any]) -> None:
 def main() -> None:
     _require_env()
     print(f"[fraktall-worker] id={WORKER_ID}")
-    print(f"[fraktall-worker] LM Studio={LMSTUDIO_BASE_URL} model={LMSTUDIO_MODEL}")
+    print(f"[fraktall-worker] LLM provider={LLM_PROVIDER} LM Studio={LMSTUDIO_BASE_URL} model={LMSTUDIO_MODEL}")
     print(f"[fraktall-worker] Whisper={WHISPER_BASE_URL} model={WHISPER_MODEL}")
 
     last_heartbeat = 0.0
