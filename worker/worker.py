@@ -135,7 +135,7 @@ def claim_next_job() -> dict[str, Any] | None:
     return claimed_rows[0] if claimed_rows else None
 
 
-def check_local_services() -> None:
+def check_lmstudio() -> None:
     lm = SESSION.get(f"{LMSTUDIO_BASE_URL}/models", timeout=10)
     if not lm.ok:
         raise RuntimeError(f"LM Studio is unavailable: HTTP {lm.status_code}")
@@ -145,6 +145,8 @@ def check_local_services() -> None:
             f"LM Studio model {LMSTUDIO_MODEL!r} is not available. Loaded/known models: {sorted(x for x in ids if x)}"
         )
 
+
+def check_whisper() -> None:
     whisper = SESSION.get(WHISPER_BASE_URL.rsplit("/v1", 1)[0] + "/health", timeout=10)
     if not whisper.ok:
         raise RuntimeError(f"Local Whisper is unavailable: HTTP {whisper.status_code}")
@@ -174,6 +176,71 @@ def download_audio(source_url: str, job_id: str) -> tuple[Path, dict[str, Any], 
             raise RuntimeError("yt-dlp finished but no audio file was found")
         filename = max(candidates, key=lambda p: p.stat().st_size)
     return filename, info, tmp
+
+
+def _pick_caption_track(info: dict[str, Any], language: str) -> dict[str, Any] | None:
+    """Prefer a human-written track over YouTube's own auto-generated one,
+    and prefer the json3 format (structured cues) when the track offers it."""
+    prefix = language.split("-")[0].lower()
+    for source in (info.get("subtitles") or {}, info.get("automatic_captions") or {}):
+        matches = [
+            formats
+            for code, formats in source.items()
+            if formats and code.split("-")[0].lower() == prefix
+        ]
+        if not matches:
+            continue
+        formats = matches[0]
+        for fmt in formats:
+            if fmt.get("ext") == "json3":
+                return fmt
+        return formats[0]
+    return None
+
+
+def _parse_json3_captions(data: dict[str, Any]) -> list[Segment]:
+    segments: list[Segment] = []
+    for event in data.get("events") or []:
+        segs = event.get("segs")
+        if not segs:
+            continue
+        text = "".join(str(s.get("utf8") or "") for s in segs).replace("\n", " ").strip()
+        if not text:
+            continue
+        start = float(event.get("tStartMs") or 0) / 1000.0
+        duration_ms = event.get("dDurationMs")
+        end = start + (float(duration_ms) / 1000.0 if duration_ms else 2.0)
+        segments.append(Segment(start=start, end=end, text=text))
+    return segments
+
+
+def fetch_captions(source_url: str, language: str) -> tuple[list[Segment], dict[str, Any]] | None:
+    """Try to reuse YouTube's own subtitles/auto-captions instead of
+    downloading audio and running local Whisper. Much faster and free
+    when available; callers must fall back to Whisper when this returns
+    None (captions disabled, wrong language, or the fetch failed)."""
+    opts: dict[str, Any] = {
+        "skip_download": True,
+        "quiet": True,
+        "no_warnings": True,
+        "retries": 3,
+        "socket_timeout": 30,
+    }
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(source_url, download=False)
+
+    track = _pick_caption_track(info, language)
+    if track is None or not track.get("url"):
+        return None
+
+    res = SESSION.get(track["url"], timeout=30)
+    if not res.ok:
+        return None
+
+    segments = _parse_json3_captions(res.json())
+    if not segments:
+        return None
+    return segments, info
 
 
 def transcribe(audio_path: Path) -> dict[str, Any]:
@@ -402,20 +469,35 @@ def process_job(job: dict[str, Any]) -> None:
     try:
         heartbeat("running", job_id)
         update_job(job_id, status="running", stage="Validando serviços locais", progress=4, started_at=_now_iso(), error=None)
-        check_local_services()
+        check_lmstudio()
 
-        update_job(job_id, stage="Baixando áudio", progress=8)
-        audio_path, info, temp = download_audio(source_url, job_id)
+        update_job(job_id, stage="Procurando legendas do YouTube", progress=8)
+        segments: list[Segment] = []
+        info: dict[str, Any] = {}
+        try:
+            captions_result = fetch_captions(source_url, WHISPER_LANGUAGE)
+        except Exception as exc:
+            captions_result = None
+            print(f"[fraktall-worker] caption fetch failed, falling back to Whisper: {exc}")
+
+        if captions_result:
+            segments, info = captions_result
+            update_job(job_id, stage="Legendas do YouTube encontradas", progress=35)
+        else:
+            check_whisper()
+            update_job(job_id, stage="Baixando áudio", progress=8)
+            audio_path, info, temp = download_audio(source_url, job_id)
+
+            update_job(job_id, stage="Transcrevendo com Whisper local", progress=20)
+            transcript = transcribe(audio_path)
+            segments = to_segments(transcript)
+            if not segments:
+                raise RuntimeError("Whisper returned no transcript segments")
+
         duration = float(info.get("duration") or 0.0)
         title = str(info.get("title") or source_url)
-
-        update_job(job_id, stage="Transcrevendo com Whisper local", progress=20)
-        transcript = transcribe(audio_path)
-        segments = to_segments(transcript)
-        if not segments:
-            raise RuntimeError("Whisper returned no transcript segments")
         if duration <= 0:
-            duration = float(transcript.get("duration") or segments[-1].end)
+            duration = segments[-1].end
 
         chunks = chunk_segments(segments)
         candidate_per_chunk = max(2, min(5, math.ceil(clip_count / max(1, len(chunks))) + 1))
@@ -441,6 +523,7 @@ def process_job(job: dict[str, Any]) -> None:
             "source_url": source_url,
             "duration": round(duration, 2),
             "curation_mode": mode,
+            "transcript_source": "youtube_captions" if captions_result else "whisper",
             "chunks_analyzed": len(chunks),
             "candidates_considered": len(all_candidates),
             "clips": selected,
