@@ -47,7 +47,7 @@ export async function POST(req: NextRequest) {
     const body = await req.json()
     const sourceUrl = String(body.sourceUrl || '').trim()
     const curationMode = String(body.curationMode || 'podcast').trim()
-    const clipCount = Math.max(1, Math.min(40, Number(body.clipCount || 8)))
+    const clipCount = Math.max(1, Math.min(10, Number(body.clipCount || 3)))
     if (!/^https?:\/\//i.test(sourceUrl)) {
       return NextResponse.json({ error: 'Informe uma URL válida.' }, { status: 400 })
     }
