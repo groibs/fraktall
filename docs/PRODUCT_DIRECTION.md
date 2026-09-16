@@ -1,40 +1,50 @@
 # Product direction: Fraktall Remote
 
-This records the direction decided for the web + local worker product (see
-`docs/WEB_WORKER_MVP.md` for the technical setup), so the reasoning behind it
-survives outside chat history. Supersedes any earlier assumption that this
-phase was heading toward a fully cloud-hosted SaaS.
+This records the direction decided for the web + worker product (see
+`docs/WEB_WORKER_MVP.md` for the original local-worker setup and
+`docs/DEPLOY_VPS.md` for the current cloud-worker deployment), so the
+reasoning behind it survives outside chat history. Supersedes any earlier
+assumption that this phase was heading toward a fully cloud-hosted SaaS.
 
-## 1. Architecture: hybrid, not SaaS — decided
+## 1. Architecture: hybrid (worker on infrastructure the user owns), not multi-tenant SaaS — decided
 
-Fraktall Remote is **not** "paste a link, everything happens in the cloud."
-It is:
+Fraktall Remote is **not** a multi-tenant "paste a link, we run it on our
+shared infrastructure" product. It is a personal tool with a public web
+panel and a worker that runs continuously on a server the user owns and
+pays for — originally the user's own PC, now a small VPS:
 
 ```
-browser → Vercel (panel) → Supabase (queue) → local worker on the user's PC
+browser → Vercel (panel) → Supabase (queue) → worker on the user's own server
           ↑                                    ├─ LM Studio or OpenAI (LLM)
-          └────────────── result ──────────────┼─ local Whisper or OpenAI (transcription fallback)
+          └────────────── result ──────────────┼─ local Whisper or OpenAI (transcription)
                                                  └─ FFmpeg (Shorts cut + upload to Supabase Storage)
 ```
 
 - The **panel** (submit form, job list, worker status) is public and always
   on, hosted on Vercel — reachable from any device, no install.
-- **All AI/video compute** (transcription, editorial analysis, and
-  eventually rendering) runs on the user's own PC, driven by a worker
-  process (`worker/worker.py`) that polls Supabase for queued jobs. LM
-  Studio and Whisper are never exposed to the internet; the worker only
-  makes outbound calls.
-- This keeps per-video compute cost at zero (no cloud GPU/transcription/LLM
-  billing) at the cost of requiring the user's PC to be on and the worker
-  running whenever a job needs to process.
-- A cloud provider can be swapped in later without a rewrite: `worker.py`'s
-  LLM calls already go through a small `LLM_PROVIDER=lmstudio|openai`
-  abstraction, and `fraktall_jobs`/`fraktall_workers` in Supabase don't
-  assume where a worker runs. Moving compute to cloud workers later is an
-  additive change, not a rebuild.
+- **All AI/video compute** runs on a worker process (`worker/worker.py`)
+  that polls Supabase for queued jobs — originally on the user's Windows
+  PC, now on a Hostinger VPS running 24/7 as a Docker container (see
+  `docs/DEPLOY_VPS.md`), with OpenAI doing transcription and analysis
+  instead of local LM Studio/Whisper. Nothing the worker talks to is ever
+  exposed to the public internet; it only makes outbound calls.
+- Moving the worker from the PC to a VPS did not require a rewrite, exactly
+  because of the provider abstraction and queue design below — it was a
+  deployment change (Dockerfile + `docs/DEPLOY_VPS.md`) plus flipping the
+  default provider env vars, not new architecture.
+- The distinction that matters isn't "local vs. cloud" — it's **single
+  worker the user owns and pays for** vs. **shared multi-tenant compute
+  billed by the product to many users**. This is still the former. Don't
+  read "the worker moved to a VPS" as "now it should become a SaaS" — that
+  question stays closed until the product owner explicitly reopens it.
+- `worker.py`'s LLM calls go through a small `LLM_PROVIDER=lmstudio|openai`
+  abstraction (defaults to `openai`), and `fraktall_jobs`/`fraktall_workers`
+  in Supabase don't assume where a worker runs — multiple workers, or a
+  worker migrating between machines, both just work.
 
 This is a considered decision, not a placeholder — don't revisit "should
-this be a SaaS" without the product owner explicitly reopening it.
+this be a multi-tenant SaaS" without the product owner explicitly reopening
+it.
 
 ## 2. It's not a Shorts generator — it's an editorial tree
 
@@ -130,17 +140,16 @@ Internal source keys: `youtube_manual`, `youtube_auto`,
   candidate quality) beyond what a human can eyeball from two runs. The
   transcript-source metadata pattern (record it in `result`, show it in
   the dashboard) is the template to extend for this if it's wanted later.
-- **Moving the worker itself into the cloud** (so nothing runs on the
-  user's PC at all). Moving *which AI provider does the analysis/
-  transcription* to OpenAI (§4) is a config switch and doesn't change
-  where the worker runs — it's still a local process downloading the
-  source and driving the pipeline. Actually hosting that orchestration in
-  the cloud (e.g. as a Vercel-triggered job) hits a hard platform
-  constraint: Vercel serverless functions have execution-time limits on
-  the order of minutes, not hours, so a multi-hour video's download +
-  transcription + analysis + render wouldn't fit in one invocation
-  regardless of provider. This needs real queue-driven infrastructure
-  (not a Vercel function) to do properly, and hasn't been built.
+
+**Resolved, not deferred:** moving the worker off the user's PC. The
+earlier note here said this needed "real queue-driven infrastructure" to
+work around Vercel serverless execution-time limits (minutes, not hours) —
+that was true for hosting the worker *as a Vercel function*, but doesn't
+apply to a VPS, which is a persistent server with no execution-time limit
+at all. `docs/DEPLOY_VPS.md` covers running `worker/worker.py` as a Docker
+container on a VPS (Hostinger), polling the same Supabase queue the same
+way the PC-based worker did — no Vercel-hosted job execution involved, so
+no rewrite was needed.
 
 ## 6. Where this came from
 

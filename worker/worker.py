@@ -20,14 +20,14 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 WORKER_ID = os.environ.get("FRAKTALL_WORKER_ID", socket.gethostname()).strip() or socket.gethostname()
 
-LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "lmstudio").strip().lower()
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "openai").strip().lower()
 LMSTUDIO_BASE_URL = os.environ.get("LMSTUDIO_BASE_URL", "http://127.0.0.1:1234/v1").rstrip("/")
 LMSTUDIO_MODEL = os.environ.get("LMSTUDIO_MODEL", "qwen/qwen3-1.7b").strip()
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip()
 
-TRANSCRIPTION_PROVIDER = os.environ.get("TRANSCRIPTION_PROVIDER", "whisper_local").strip().lower()
+TRANSCRIPTION_PROVIDER = os.environ.get("TRANSCRIPTION_PROVIDER", "openai").strip().lower()
 OPENAI_TRANSCRIBE_MODEL = os.environ.get("OPENAI_TRANSCRIBE_MODEL", "whisper-1").strip()
 WHISPER_BASE_URL = os.environ.get("WHISPER_BASE_URL", "http://127.0.0.1:8178/v1").rstrip("/")
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small").strip()
@@ -60,6 +60,10 @@ def _require_env() -> None:
         missing.append("SUPABASE_URL")
     if not SUPABASE_KEY:
         missing.append("SUPABASE_SERVICE_ROLE_KEY")
+    if LLM_PROVIDER == "openai" and not OPENAI_API_KEY:
+        missing.append("OPENAI_API_KEY (required when LLM_PROVIDER=openai)")
+    if TRANSCRIPTION_PROVIDER == "openai" and not OPENAI_API_KEY:
+        missing.append("OPENAI_API_KEY (required when TRANSCRIPTION_PROVIDER=openai)")
     if missing:
         raise SystemExit("Missing environment variables: " + ", ".join(missing))
 
@@ -117,9 +121,10 @@ def heartbeat(status: str = "idle", current_job: str | None = None) -> None:
         "last_seen": _now_iso(),
         "metadata": {
             "llm_provider": LLM_PROVIDER,
-            "lmstudio_model": LMSTUDIO_MODEL,
-            "lmstudio_base": LMSTUDIO_BASE_URL,
-            "whisper_model": WHISPER_MODEL,
+            "llm_model": OPENAI_MODEL if LLM_PROVIDER == "openai" else LMSTUDIO_MODEL,
+            "lmstudio_base": LMSTUDIO_BASE_URL if LLM_PROVIDER != "openai" else None,
+            "transcription_provider": TRANSCRIPTION_PROVIDER,
+            "transcription_model": OPENAI_TRANSCRIBE_MODEL if TRANSCRIPTION_PROVIDER == "openai" else WHISPER_MODEL,
         },
     }
     _supa(
@@ -306,6 +311,7 @@ def download_audio(source_url: str, job_id: str) -> tuple[Path, dict[str, Any], 
         "no_warnings": True,
         "retries": 3,
         "socket_timeout": 30,
+        "ffmpeg_location": _ffmpeg_path(),
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(source_url, download=True)
@@ -1167,8 +1173,14 @@ def process_job(job: dict[str, Any]) -> None:
 def main() -> None:
     _require_env()
     print(f"[fraktall-worker] id={WORKER_ID}")
-    print(f"[fraktall-worker] LLM provider={LLM_PROVIDER} LM Studio={LMSTUDIO_BASE_URL} model={LMSTUDIO_MODEL}")
-    print(f"[fraktall-worker] Whisper={WHISPER_BASE_URL} model={WHISPER_MODEL}")
+    if LLM_PROVIDER == "openai":
+        print(f"[fraktall-worker] LLM provider=openai model={OPENAI_MODEL}")
+    else:
+        print(f"[fraktall-worker] LLM provider=lmstudio base={LMSTUDIO_BASE_URL} model={LMSTUDIO_MODEL}")
+    if TRANSCRIPTION_PROVIDER == "openai":
+        print(f"[fraktall-worker] Transcription provider=openai model={OPENAI_TRANSCRIBE_MODEL}")
+    else:
+        print(f"[fraktall-worker] Transcription provider=whisper_local base={WHISPER_BASE_URL} model={WHISPER_MODEL}")
 
     last_heartbeat = 0.0
     while True:

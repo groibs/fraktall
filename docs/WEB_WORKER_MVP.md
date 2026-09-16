@@ -1,6 +1,14 @@
-# Fraktall Web + Local Worker MVP
+# Fraktall Web + Worker MVP
 
-This phase moves the control surface to the web without moving AI/video compute off the user's PC.
+> **Running this for real use?** See `docs/DEPLOY_VPS.md` instead — it
+> deploys the same worker described here as an always-on Docker container on
+> a VPS, so nothing depends on your PC being on. The Windows instructions
+> below (§3) are still useful for local development/testing the worker on
+> your own machine, but are no longer the recommended way to run it day to
+> day.
+
+This phase moves the control surface to the web. Section 1-2 (Supabase +
+Vercel) apply either way; section 3 covers the original local-PC worker.
 
 ```text
 Browser
@@ -99,7 +107,7 @@ Deploy. The access token is the password entered in the Fraktall web dashboard; 
   (env var changes only take effect on deployments created after the change;
   redeploying an existing deployment reuses its original snapshot).
 
-## 3. Configure the Windows worker
+## 3. Configure the Windows worker (local development only — see `docs/DEPLOY_VPS.md` for real use)
 
 From `C:\dev\fraktall` after pulling this branch/change:
 
