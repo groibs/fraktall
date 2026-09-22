@@ -60,9 +60,10 @@ type Worker = {
   last_seen: string
   metadata?: {
     llm_provider?: string
-    lmstudio_model?: string
+    llm_model?: string
     lmstudio_base?: string
-    whisper_model?: string
+    transcription_provider?: string
+    transcription_model?: string
   }
 }
 
@@ -175,19 +176,20 @@ export default function Home() {
 
   const worker = workers[0]
   const workerOnline = Boolean(worker && worker.status !== 'offline' && secondsAgo(worker.last_seen) < 30)
-  const lmStudioModel = worker?.metadata?.lmstudio_model
+  const llmProvider = worker?.metadata?.llm_provider
+  const llmModel = worker?.metadata?.llm_model
 
   return (
     <main className="shell">
       <div className="topbar">
         <div className="brand"><span className="mark">F</span> Fraktall <span className="pill">Remote</span></div>
-        <span className="muted">Vercel → fila → seu PC → LM Studio</span>
+        <span className="muted">Vercel → fila → worker na nuvem → OpenAI</span>
       </div>
 
       <div className="grid">
         <section className="card">
-          <h1>Envie um vídeo. Seu PC faz o trabalho pesado.</h1>
-          <p>O painel fica na web, mas LM Studio e Whisper continuam locais. O vídeo-fonte não precisa ser processado pela Vercel.</p>
+          <h1>Envie um vídeo. O worker na nuvem faz o trabalho pesado.</h1>
+          <p>O painel fica na web e o worker roda num servidor seu (VPS) 24/7, sem depender do seu computador ligado.</p>
 
           <form className="form" onSubmit={submit}>
             <div className="field">
@@ -210,7 +212,7 @@ export default function Home() {
                 <input className="input" type="number" min={1} max={10} value={clipCount} onChange={(e) => setClipCount(Number(e.target.value))} />
               </div>
             </div>
-            <button className="btn" disabled={busy || !url || !token}>{busy ? 'Enviando…' : 'Processar no meu PC'}</button>
+            <button className="btn" disabled={busy || !url || !token}>{busy ? 'Enviando…' : 'Processar na nuvem'}</button>
             {message && <div className={message.toLowerCase().includes('erro') ? 'error' : 'muted'}>{message}</div>}
           </form>
 
@@ -230,7 +232,7 @@ export default function Home() {
             <div className="workerpanel">
               <span>{worker.id}</span>
               <span>{workerOnline ? `último heartbeat ${secondsAgo(worker.last_seen)}s atrás` : 'offline'}</span>
-              {lmStudioModel && <span>LM Studio: {lmStudioModel}</span>}
+              {llmModel && <span>{llmProvider === 'openai' ? 'OpenAI' : 'LM Studio'}: {llmModel}</span>}
             </div>
           )}
           <div className="jobs">
